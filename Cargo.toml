@@ -1,0 +1,20 @@
+[package]
+name = "curlman"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitflags = "2.6.0"
+crossterm = "0.28.1"
+curl = { version = "0.4.47" , default-features = false}
+jq-rs = "0.4.1"
+ratatui = { version = "0.28.1", features = ["unstable-widget-ref"] }
+tui-textarea = "0.6.1"
+
+[features]
+default = ["dynamic"]
+static = ["curl/static-ssl", "curl/static-curl", "jq-rs/bundled"]
+dynamic = ["curl/ssl"]
+
+
+
