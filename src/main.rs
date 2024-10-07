@@ -1,16 +1,12 @@
-use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use std::collections::HashMap;
 mod custom_widgets;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, *},
+    event::{self, Event, KeyCode, KeyEventKind, *},
     terminal::disable_raw_mode,
 };
-
+use custom_widgets::CurlmanWidget;
 use ratatui::{layout::Layout, prelude::*, widgets::WidgetRef, DefaultTerminal};
-use tui_textarea::TextArea;
 
 struct PaneParent {
     layout_idx: u32,
@@ -30,14 +26,14 @@ impl AvailableDirections {
 }
 
 struct PaneWidget {
-    widget: Box<dyn WidgetRef>,
+    widget: Box<dyn CurlmanWidget>,
     layout_idx: usize,
     available_directions: AvailableDirections,
 }
 
 impl PaneWidget {
     fn new(
-        widget: Box<dyn WidgetRef>,
+        widget: Box<dyn CurlmanWidget>,
         layout_id: usize,
         available_directions: AvailableDirections,
     ) -> Self {
@@ -66,55 +62,20 @@ impl Pane {
     }
 }
 
-struct App<'app> {
+struct App {
     panes: HashMap<u32, Pane>,
     layouts: HashMap<u32, Layout>,
-    input: InputHandler<'app>,
+    selected_pane_id: u32,
+    selected_widget_idx: usize,
 }
 
-struct InputHandler<'app> {
-    textarea: Option<TextArea<'app>>,
-}
-
-impl<'app> InputHandler<'app> {
-    fn handle_input(&mut self, event: Event) {
-        match event {
-            Event::Key(key_event) => self.handle_key_events(key_event),
-            Event::Mouse(mouse_event) => {}
-            Event::Paste(_) => {}
-            Event::FocusGained => {}
-            Event::FocusLost => {}
-            Event::Resize(_, _) => {}
-        };
-    }
-
-    fn handle_key_events(&mut self, event: KeyEvent) {
-        match event {
-            KeyEvent {
-                code: KeyCode::Char(ch),
-                modifiers: KeyModifiers::NONE,
-                kind: KeyEventKind::Press | KeyEventKind::Repeat,
-                state: KeyEventState::NONE,
-            } => self.handle_char_key_presses(ch),
-            _ => {}
-        }
-    }
-
-    fn handle_char_key_presses(&mut self, char: char) {
-        match char {
-            'h' => {}
-            'j' => {}
-            'k' => {}
-            'l' => {}
-            _ => {}
-        }
-    }
-
-    fn handle_special_key_presses() {}
-}
-
-impl<'app> App<'app> {
-    fn new(panes: Vec<Pane>, layouts: Vec<Layout>) -> Self {
+impl App {
+    fn new(
+        panes: Vec<Pane>,
+        layouts: Vec<Layout>,
+        default_pane_id: u32,
+        default_widget_idx: usize,
+    ) -> Self {
         assert_eq!(panes.len(), layouts.len());
 
         let pane_map_iter = panes
@@ -130,9 +91,8 @@ impl<'app> App<'app> {
         App {
             panes: HashMap::from_iter(pane_map_iter),
             layouts: HashMap::from_iter(layout_map_iter),
-            input: InputHandler {
-                textarea: Some(TextArea::default()),
-            },
+            selected_pane_id: default_pane_id,
+            selected_widget_idx: default_widget_idx,
         }
     }
 
@@ -164,11 +124,17 @@ impl<'app> App<'app> {
                 }
             })?;
 
-            if let event::Event::Key(key) = event::read()? {
+            let event = event::read()?;
+
+            if let event::Event::Key(key) = event {
                 if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
                     return Ok(());
                 }
             }
+
+            self.panes.get_mut(&self.selected_pane_id).unwrap().widgets[self.selected_widget_idx]
+                .widget
+                .handle_event(event)
         }
     }
 }
@@ -182,32 +148,22 @@ fn main() -> std::io::Result<()> {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Fill(1)]);
 
-    let mut textarea = TextArea::default();
+    let editor_widget = Box::new(custom_widgets::Editor::default());
 
     let widgets = vec![
         PaneWidget::new(
-            Box::new(custom_widgets::get_round_bordered_box()),
+            Box::new(custom_widgets::RequestBrowser::default()),
             0,
             AvailableDirections::NONE,
         ),
-        PaneWidget::new(Box::new(&textarea), 0, AvailableDirections::NONE),
+        PaneWidget::new(editor_widget, 1, AvailableDirections::NONE),
     ];
 
     let layouts = vec![parent_layout];
 
-    let panes = vec![
-        Pane::new(widgets, None, 0),
-        Pane::new(
-            inner_widgets,
-            Some(PaneParent {
-                layout_idx: 0,
-                layout_pos_idx: 1,
-            }),
-            1,
-        ),
-    ];
+    let panes = vec![Pane::new(widgets, None, 0)];
 
-    let mut app = App::new(panes, layouts);
+    let mut app = App::new(panes, layouts, 0, 1);
 
     app.run(&mut terminal)?;
     ratatui::restore();

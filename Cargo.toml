@@ -7,9 +7,9 @@ edition = "2021"
 bitflags = "2.6.0"
 crossterm = "0.28.1"
 curl = { version = "0.4.47" , default-features = false}
+gapbuf = "0.1.4"
 jq-rs = "0.4.1"
 ratatui = { version = "0.28.1", features = ["unstable-widget-ref"] }
-tui-textarea = "0.6.1"
 
 [features]
 default = ["dynamic"]
