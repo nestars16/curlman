@@ -1,8 +1,7 @@
 use std::char;
 
-use crossterm::{
-    cursor,
-    event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers},
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, ModifierKeyCode,
 };
 use gapbuf::{gap_buffer, GapBuffer};
 use ratatui::{
@@ -14,17 +13,15 @@ use ratatui::{
 };
 
 pub struct Editor<'editor> {
-    cursor: usize,
+    cursor: usize, //Its always pointing to the index in which a character would be inserted
     text_buffer: GapBuffer<char>,
     block: Block<'editor>,
     tab_len: u8,
-    cursor_caret: char,
 }
 
 impl<'editor> Default for Editor<'editor> {
     fn default() -> Self {
         Editor {
-            cursor_caret: '|',
             cursor: 0,
             text_buffer: gap_buffer![],
             block: get_round_bordered_box(),
@@ -39,9 +36,25 @@ impl<'editor> Editor<'editor> {
         let mut spans = Vec::new();
         let mut lines = Vec::new();
 
+        if self.text_buffer.is_empty() {
+            return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
+        }
+
         for (i, ch) in self.text_buffer.iter().enumerate() {
-            if i == self.cursor && *ch != '\n' {
-                char_buf.push(self.cursor_caret);
+            if *ch == '\n' {
+                if !char_buf.is_empty() {
+                    spans.push(Span::from(std::mem::take(&mut char_buf)));
+                }
+
+                lines.push(Line::from(std::mem::take(&mut spans)));
+            }
+
+            if i == self.cursor - 1 {
+                spans.push(Span::from(std::mem::take(&mut char_buf)));
+                spans.push(Span::styled(
+                    String::from(*ch),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
                 continue;
             }
 
@@ -51,12 +64,7 @@ impl<'editor> Editor<'editor> {
                 continue;
             }
 
-            if *ch == '\n' {
-                lines.push(Line::from(std::mem::take(&mut spans)));
-                continue;
-            }
-
-            char_buf.push(*ch)
+            char_buf.push(*ch);
         }
 
         if !char_buf.is_empty() {
@@ -85,7 +93,7 @@ impl<'editor> Editor<'editor> {
         match event {
             KeyEvent {
                 code: KeyCode::Char(ch),
-                modifiers: KeyModifiers::NONE,
+                modifiers,
                 kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 state: KeyEventState::NONE,
             } => self.handle_char_key_presses(ch),
@@ -97,6 +105,29 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Backspace,
                 ..
             } => self.delete_char(),
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => self.insert_tab(),
+            KeyEvent {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.move_up(),
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.move_down(),
+            KeyEvent {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.move_left(),
+            KeyEvent {
+                code: KeyCode::Right,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => self.move_right(),
             _ => {}
         }
     }
@@ -113,12 +144,88 @@ impl<'editor> Editor<'editor> {
     }
 
     fn insert_newline(&mut self) {
-        self.text_buffer.insert_many(self.cursor, [' ', '\n']);
-        self.cursor += 2;
+        self.text_buffer.insert(self.cursor, '\n');
+        self.cursor += 1;
+    }
+
+    fn insert_tab(&mut self) {
+        self.text_buffer
+            .insert_many(self.cursor, (0..self.tab_len).map(|_| ' '));
+
+        self.cursor += self.tab_len as usize;
+    }
+
+    fn move_up(&mut self) {
+        let mut newline_count = 0;
+        let mut prev_line_start_idx = 0;
+        let (mut line_start_idx, mut line_end_idx): (i32, i32) = (0, -1);
+
+        for i in self.cursor..self.text_buffer.len() {
+            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+                line_end_idx = i as i32;
+            }
+        }
+
+        if line_end_idx == -1 {
+            line_end_idx = self.text_buffer.len() as i32;
+        }
+
+        for i in (0..=self.cursor).rev() {
+            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+                match newline_count {
+                    0 => line_start_idx = i as i32,
+                    1 => prev_line_start_idx = i as i32,
+                    _ => break,
+                }
+                newline_count += 1
+            }
+        }
+
+        let jump_idx = prev_line_start_idx as usize + (self.cursor - line_start_idx as usize);
+
+        self.cursor = if jump_idx < line_start_idx as usize {
+            jump_idx - 1
+        } else {
+            (line_start_idx - 1) as usize
+        };
+
+        eprint!("Text buffer -  {:?}\n", &self.text_buffer);
+        eprint!(
+            "line start {} - line end {}\n",
+            line_start_idx, line_end_idx
+        );
+        eprint!("Prev line start {}\n", prev_line_start_idx);
+        eprint!("Cursor - {}\n", self.cursor);
+        eprint!(
+            "Jump index - {}\n",
+            if jump_idx < line_start_idx as usize {
+                jump_idx - 1
+            } else {
+                (line_start_idx - 1) as usize
+            }
+        );
+    }
+
+    fn move_down(&mut self) {}
+
+    fn move_right(&mut self) {
+        if self.cursor >= self.text_buffer.len() {
+            return;
+        }
+
+        self.cursor += 1
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor < 1 {
+            return;
+        }
+
+        self.cursor -= 1;
     }
 
     fn delete_char(&mut self) {
-        if self.cursor <= 0 {
+        if self.cursor < 1 {
             return;
         }
 

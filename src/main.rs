@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 mod custom_widgets;
+
 use crossterm::terminal::enable_raw_mode;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, *},
@@ -7,6 +7,7 @@ use crossterm::{
 };
 use custom_widgets::CurlmanWidget;
 use ratatui::{layout::Layout, prelude::*, widgets::WidgetRef, DefaultTerminal};
+use std::collections::HashMap;
 
 struct PaneParent {
     layout_idx: u32,
