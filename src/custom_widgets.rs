@@ -1,8 +1,6 @@
 use std::char;
 
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, ModifierKeyCode,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use gapbuf::{gap_buffer, GapBuffer};
 use ratatui::{
@@ -19,9 +17,14 @@ pub enum VimMode {
     Visual,
 }
 
+pub enum NormalModeInputTypes {
+    Motion(VimCommand),
+    Input(char),
+}
+
 pub enum VimState {
-    WaitingMotion,
-    WaitingOperator,
+    AwaitingFirstInput,
+    AwaitingOperatorOperand,
 }
 
 pub enum VimOperator {
@@ -35,6 +38,8 @@ pub enum VimOperator {
 
 pub enum VimCommand {
     Move(VimOperator),
+    InsertNewLineUp,
+    InsertNewLineDown,
     Append,
     Insert,
     Delete(VimOperator),
@@ -67,40 +72,40 @@ impl TryFrom<char> for VimCommand {
             'j' => Ok(Self::Move(VimOperator::Down)),
             'h' => Ok(Self::Move(VimOperator::Left)),
             'l' => Ok(Self::Move(VimOperator::Right)),
+            'x' => Ok(Self::Delete(VimOperator::Right)),
             _ => Err(()),
         }
     }
 }
 
-impl TryFrom<[char; 2]> for VimCommand {
+impl TryFrom<[char; 3]> for VimCommand {
     type Error = ();
 
-    fn try_from(value: [char; 2]) -> Result<Self, Self::Error> {
+    fn try_from(value: [char; 3]) -> Result<Self, Self::Error> {
         match value {
-            ['f', second] => Ok(Self::Move(VimOperator::Until(second))),
-            [first, second] => {
-                let operator = second.try_into()?;
-
-                match first {
-                    'd' => Ok(Self::Delete(operator)),
-                    'y' => Ok(Self::Yank(operator)),
-                    _ => Err(()),
-                }
-            }
+            ['f', second, ' '] => Ok(Self::Move(VimOperator::Until(second))),
+            ['d', 'd', ' '] => Ok(Self::Delete(VimOperator::Whole)),
+            ['d', 'f', ' '] => Err(()),
+            ['d', 'f', third] => Ok(Self::Delete(VimOperator::Until(third))),
+            ['y', 'f', ' '] => Err(()),
+            ['y', 'f', third] => Ok(Self::Yank(VimOperator::Until(third))),
+            _ => Err(()),
         }
     }
 }
 
 pub struct VimEditorState {
-    motion_buffer: [char; 2],
+    motion_buffer: [char; 3],
+    repeat_n: String,
     current_state: VimState,
 }
 
 impl Default for VimEditorState {
     fn default() -> Self {
         VimEditorState {
-            motion_buffer: [' ', ' '],
-            current_state: VimState::WaitingMotion,
+            motion_buffer: [' ', ' ', ' '],
+            current_state: VimState::AwaitingFirstInput,
+            repeat_n: String::new(),
         }
     }
 }
@@ -131,8 +136,9 @@ impl<'editor> Default for Editor<'editor> {
             current_mode: EditorMode::Vim {
                 mode: VimMode::Normal,
                 state: VimEditorState {
-                    motion_buffer: [' ', ' '],
-                    current_state: VimState::WaitingMotion,
+                    repeat_n: String::new(),
+                    motion_buffer: [' ', ' ', ' '],
+                    current_state: VimState::AwaitingFirstInput,
                 },
             },
         }
@@ -149,26 +155,18 @@ impl<'editor> Editor<'editor> {
             return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
         }
 
-        let cursor_value = if self.cursor > 0 {
-            self.cursor - 1
-        } else {
-            self.cursor
-        };
-
         for (i, ch) in self.text_buffer.iter().enumerate() {
             if *ch == '\n' {
                 if !char_buf.is_empty() {
                     spans.push(Span::from(std::mem::take(&mut char_buf)));
                 }
-
                 lines.push(Line::from(std::mem::take(&mut spans)));
-
-                if i == cursor_value {
-                    spans.push(Span::raw("|").add_modifier(Modifier::RAPID_BLINK));
+                if i == self.cursor - 1 {
+                    spans.push(Span::raw(" ").add_modifier(Modifier::REVERSED));
                 }
             }
 
-            if i == cursor_value {
+            if i == self.cursor - 1 {
                 spans.push(Span::from(std::mem::take(&mut char_buf)));
                 spans.push(Span::styled(
                     String::from(*ch),
@@ -221,7 +219,7 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Char(ch),
                 kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 ..
-            } => self.handle_char_key_presses(ch),
+            } => self.insert_char(ch),
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
@@ -229,7 +227,7 @@ impl<'editor> Editor<'editor> {
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
-            } => self.delete_char(),
+            } => self.backspace_delete(),
             KeyEvent {
                 code: KeyCode::Tab, ..
             } => self.insert_tab(),
@@ -268,13 +266,67 @@ impl<'editor> Editor<'editor> {
 
                 self.switch_to_normal_mode()
             }
+            _ => {}
+        }
+    }
 
+    fn handle_commands(&mut self, command: VimCommand) {
+        match command {
+            VimCommand::Move(VimOperator::Up) => self.move_up(),
+            VimCommand::Move(VimOperator::Down) => self.move_down(),
+            VimCommand::Move(VimOperator::Left) => self.move_left(),
+            VimCommand::Move(VimOperator::Right) => self.move_right(),
+            VimCommand::Append => {
+                self.switch_to_insert_mode();
+            }
+            VimCommand::Insert => {
+                self.switch_to_insert_mode();
+                if self.cursor > 0 {
+                    self.cursor -= 1
+                }
+            }
+            VimCommand::Delete(vim_operator) => match vim_operator {
+                VimOperator::Up => {}
+                VimOperator::Down => {}
+                VimOperator::Left => {
+                    if self.cursor > 2 {
+                        self.text_buffer.remove(self.cursor - 2);
+                        self.cursor -= 1;
+                    }
+                }
+                VimOperator::Right => {
+                    self.backspace_delete();
+                }
+                VimOperator::Until(char) => {
+                    let mut stop: Option<usize> = None;
+                    let line_end_idx = self.get_line_end();
+                    for i in self.cursor..=line_end_idx {
+                        if self.text_buffer.get(i).is_some_and(|ch| *ch == char) {
+                            stop = Some(i)
+                        }
+                    }
+
+                    if let Some(stop) = stop {
+                        self.text_buffer.drain((self.cursor - 1)..=stop);
+                    }
+                }
+                VimOperator::Whole => {
+                    self.text_buffer
+                        .drain(self.get_line_start()..self.get_line_end());
+
+                    if self.cursor > self.text_buffer.len() {
+                        self.cursor = self.text_buffer.len()
+                    }
+                }
+            },
+            VimCommand::InsertNewLineDown => self.insert_newline(),
             _ => {}
         }
     }
 
     fn handle_vim_motions(&mut self, e: KeyEvent) {
-        let EditorMode::Vim { mode, state } = &mut self.current_mode else {
+        let mut command_to_exec = None;
+        let EditorMode::Vim { ref mode, state } = &mut self.current_mode else {
             return;
         };
 
@@ -285,40 +337,49 @@ impl<'editor> Editor<'editor> {
         match e {
             KeyEvent {
                 code: KeyCode::Char(ch),
-                kind,
                 ..
             } => match state.current_state {
-                VimState::WaitingMotion => {
-                    let command_res: Result<VimCommand, ()> = ch.try_into();
-
-                    let Ok(command) = command_res else {
+                VimState::AwaitingFirstInput => {
+                    if ch.is_ascii_digit() {
+                        state.repeat_n.push(ch)
+                    } else {
                         state.motion_buffer[0] = ch;
-                        state.current_state = VimState::WaitingOperator;
-                        return;
-                    };
-
-                    match command {
-                        VimCommand::Move(VimOperator::Up) => self.move_up(),
-                        VimCommand::Move(VimOperator::Down) => self.move_down(),
-                        VimCommand::Move(VimOperator::Left) => self.move_left(),
-                        VimCommand::Move(VimOperator::Right) => self.move_right(),
-                        VimCommand::Append => {
-                            self.switch_to_insert_mode();
-                            if self.cursor < self.text_buffer.len() {
-                                self.cursor += 1
-                            }
-                        }
-                        VimCommand::Insert => {
-                            self.switch_to_insert_mode();
-                        }
-                        VimCommand::Delete(vim_operator) => todo!(),
-                        VimCommand::Yank(vim_operator) => todo!(),
-                        _ => {}
+                        state.current_state = VimState::AwaitingOperatorOperand;
+                        if let Ok(command) = TryInto::<VimCommand>::try_into(state.motion_buffer[0])
+                        {
+                            state.motion_buffer = [' ', ' ', ' '];
+                            state.current_state = VimState::AwaitingFirstInput;
+                            command_to_exec = Some(command);
+                        };
                     }
                 }
-                VimState::WaitingOperator => {}
+                VimState::AwaitingOperatorOperand => {
+                    if state.motion_buffer[1] == ' ' {
+                        state.motion_buffer[1] = ch
+                    } else {
+                        state.motion_buffer[2] = ch
+                    }
+
+                    match TryInto::<VimCommand>::try_into(state.motion_buffer) {
+                        Ok(command) => {
+                            state.current_state = VimState::AwaitingFirstInput;
+                            state.motion_buffer = [' ', ' ', ' '];
+                            command_to_exec = Some(command);
+                        }
+                        Err(_) => {
+                            if state.motion_buffer[2] != ' ' {
+                                state.current_state = VimState::AwaitingFirstInput;
+                                state.motion_buffer = [' ', ' ', ' '];
+                            }
+                        }
+                    }
+                }
             },
             _ => {}
+        };
+
+        if let Some(command) = command_to_exec {
+            self.handle_commands(command)
         }
     }
 
@@ -340,12 +401,6 @@ impl<'editor> Editor<'editor> {
         *state = VimEditorState::default();
     }
 
-    fn handle_char_key_presses(&mut self, char: char) {
-        match char {
-            _ => self.insert_char(char),
-        }
-    }
-
     fn insert_char(&mut self, ch: char) {
         self.text_buffer.insert(self.cursor, ch);
         self.cursor += 1;
@@ -361,6 +416,31 @@ impl<'editor> Editor<'editor> {
             .insert_many(self.cursor, (0..self.tab_len).map(|_| ' '));
 
         self.cursor += self.tab_len as usize;
+    }
+
+    fn get_line_end(&self) -> usize {
+        let mut line_end_idx = self.text_buffer.len() - 1;
+
+        for i in self.cursor..self.text_buffer.len() {
+            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+                line_end_idx = i;
+                break;
+            }
+        }
+
+        line_end_idx
+    }
+
+    fn get_line_start(&self) -> usize {
+        let mut line_start_idx = 0;
+
+        for i in (0..=self.cursor).rev() {
+            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+                line_start_idx = i as i32;
+            }
+        }
+
+        line_start_idx as usize
     }
 
     fn move_up(&mut self) {
@@ -385,7 +465,6 @@ impl<'editor> Editor<'editor> {
         }
 
         let jump_idx = prev_line_start_idx as usize + (self.cursor - line_start_idx as usize);
-
         self.cursor = if jump_idx < line_start_idx as usize {
             jump_idx - 1
         } else {
@@ -411,20 +490,11 @@ impl<'editor> Editor<'editor> {
             return;
         }
 
-        let mut line_start_idx = -1;
-        for i in (0..=self.cursor).rev() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
-                line_start_idx = i as i32;
-            }
-        }
-
-        if line_start_idx == -1 {
-            line_start_idx = 0
-        }
-
         if next_line_end == -1 {
             next_line_end = self.text_buffer.len() as i32 - 1;
         }
+
+        let line_start_idx = self.get_line_start();
 
         let curr_offset = self.cursor - line_start_idx as usize;
         let next_line_length = next_line_end as usize - line_end_idx as usize;
@@ -444,10 +514,21 @@ impl<'editor> Editor<'editor> {
     }
 
     fn move_left(&mut self) {
-        if self.cursor < 1 {
+        if self.cursor <= 1 {
             return;
         }
 
+        self.cursor -= 1;
+    }
+
+    fn backspace_delete(&mut self) {
+        if self.cursor < 1 {
+            if !self.text_buffer.is_empty() {
+                self.text_buffer.remove(0);
+            }
+            return;
+        }
+        self.text_buffer.remove(self.cursor - 1);
         self.cursor -= 1;
     }
 
@@ -459,7 +540,6 @@ impl<'editor> Editor<'editor> {
             return;
         }
         self.text_buffer.remove(self.cursor - 1);
-        self.cursor -= 1;
     }
 }
 
