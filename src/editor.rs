@@ -17,11 +17,6 @@ pub enum VimMode {
     Visual,
 }
 
-pub enum NormalModeInputTypes {
-    Motion(VimCommand),
-    Input(char),
-}
-
 pub enum VimState {
     AwaitingFirstInput,
     AwaitingOperatorOperand,
@@ -155,18 +150,25 @@ impl<'editor> Editor<'editor> {
             return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
         }
 
+        let cursor_value = if self.cursor > 0 {
+            self.cursor - 1
+        } else {
+            self.cursor
+        };
+
         for (i, ch) in self.text_buffer.iter().enumerate() {
             if *ch == '\n' {
                 if !char_buf.is_empty() {
                     spans.push(Span::from(std::mem::take(&mut char_buf)));
                 }
+
                 lines.push(Line::from(std::mem::take(&mut spans)));
-                if i == self.cursor - 1 {
+                if i == cursor_value {
                     spans.push(Span::raw(" ").add_modifier(Modifier::REVERSED));
                 }
             }
 
-            if i == self.cursor - 1 {
+            if i == cursor_value {
                 spans.push(Span::from(std::mem::take(&mut char_buf)));
                 spans.push(Span::styled(
                     String::from(*ch),
@@ -319,7 +321,7 @@ impl<'editor> Editor<'editor> {
                     }
                 }
             },
-            VimCommand::InsertNewLineDown => self.insert_newline(),
+            VimCommand::InsertNewLineDown => {}
             _ => {}
         }
     }
@@ -433,10 +435,10 @@ impl<'editor> Editor<'editor> {
 
     fn get_line_start(&self) -> usize {
         let mut line_start_idx = 0;
-
-        for i in (0..=self.cursor).rev() {
+        for i in (0..self.cursor).rev() {
             if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
                 line_start_idx = i as i32;
+                break;
             }
         }
 
@@ -444,64 +446,102 @@ impl<'editor> Editor<'editor> {
     }
 
     fn move_up(&mut self) {
-        let mut newline_count = 0;
-        let mut prev_line_start_idx = 0;
+        let line_start = self.get_line_start();
 
-        let mut line_start_idx = -1;
-
-        for i in (0..=self.cursor).rev() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
-                match newline_count {
-                    0 => line_start_idx = i as i32,
-                    1 => prev_line_start_idx = i as i32,
-                    _ => break,
-                }
-                newline_count += 1
-            }
-        }
-
-        if line_start_idx == -1 {
+        if line_start == 0 {
             return;
         }
 
-        let jump_idx = prev_line_start_idx as usize + (self.cursor - line_start_idx as usize);
-        self.cursor = if jump_idx < line_start_idx as usize {
-            jump_idx - 1
-        } else {
-            (line_start_idx) as usize
+        // Find the start of the previous line
+        let mut prev_line_start = None;
+
+        for i in (0..line_start).rev() {
+            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+                prev_line_start = Some(i);
+                break;
+            }
+        }
+
+        let curr_offset = self.cursor - line_start;
+
+        let Some(prev_line_start) = prev_line_start else {
+            self.cursor = if curr_offset < line_start {
+                curr_offset - 1
+            } else {
+                line_start - 1
+            };
+
+            return;
         };
+
+        //The idea here is similar to our move down after finding our line_start
+        //and our previous_line_start, since we know our offset
+        //is self.cursor - line_start all we have to do is
+        //set our self.cursor to previous_line_start + offset
+        //if the line is equal or larger to the offset, otherwise
+        // we set it to previous_line_start + 1
+
+        let target = prev_line_start + curr_offset;
+
+        self.cursor = if target >= line_start {
+            prev_line_start + 1
+        } else {
+            target
+        }
     }
 
     fn move_down(&mut self) {
+        let mut line_end: Option<usize> = None;
+        let mut next_line_end: Option<usize> = None;
         let mut newline_count = 0;
 
-        let (mut line_end_idx, mut next_line_end) = (-1, -1);
         for i in self.cursor..self.text_buffer.len() {
             if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
                 match newline_count {
-                    0 => line_end_idx = i as i32,
-                    1 => next_line_end = i as i32,
-                    _ => break,
-                };
-                newline_count += 1
+                    0 => {
+                        line_end = Some(i);
+                        newline_count += 1;
+                    }
+                    1 => next_line_end = Some(i),
+                    _ => {
+                        unreachable!()
+                    }
+                }
             }
         }
-        if line_end_idx == -1 {
+
+        //This means that we found newline from
+        //our cursor onwards, meaning nowhere to go
+        let Some(line_end) = line_end else {
             return;
-        }
+        };
 
-        if next_line_end == -1 {
-            next_line_end = self.text_buffer.len() as i32 - 1;
-        }
+        let line_start = self.get_line_start();
+        let curr_offset = self.cursor - line_start;
+        let target = line_end + curr_offset;
 
-        let line_start_idx = self.get_line_start();
+        eprintln!(
+            "- Our current line end index is {}\n\tOur offset is {}\n\tOur line_start is {} which corresponds to letter {:?}\n\tOur target would be {} or {}\n\tour cursor is {}",
+            line_end, curr_offset, line_start, self.text_buffer.get(line_start +1), target, next_line_end.unwrap_or(1) - 1, self.cursor
+        );
 
-        let curr_offset = self.cursor - line_start_idx as usize;
-        let next_line_length = next_line_end as usize - line_end_idx as usize;
-        if curr_offset > next_line_length {
-            self.cursor = self.text_buffer.len() - 1;
+        //Here we check if needs to bounds check, if there is no
+        //next line after our line end then we can just
+        //check our current line offset and see if it fits in the next line
+        //if it doesn't then we just set it at the end of the line
+        let Some(next_line_end) = next_line_end else {
+            self.cursor = if target < self.text_buffer.len() {
+                target
+            } else {
+                self.text_buffer.len()
+            };
+            return;
+        };
+
+        self.cursor = if target > next_line_end {
+            next_line_end - 1
         } else {
-            self.cursor = line_end_idx as usize + curr_offset + 1;
+            target + if line_start == 0 { 1 } else { 0 }
         }
     }
 
@@ -528,18 +568,9 @@ impl<'editor> Editor<'editor> {
             }
             return;
         }
+
         self.text_buffer.remove(self.cursor - 1);
         self.cursor -= 1;
-    }
-
-    fn delete_char(&mut self) {
-        if self.cursor < 1 {
-            if !self.text_buffer.is_empty() {
-                self.text_buffer.remove(0);
-            }
-            return;
-        }
-        self.text_buffer.remove(self.cursor - 1);
     }
 }
 

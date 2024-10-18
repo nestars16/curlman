@@ -1,11 +1,14 @@
-mod custom_widgets;
+mod editor;
+mod parser;
+mod types;
 
 use crossterm::terminal::enable_raw_mode;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, *},
     terminal::disable_raw_mode,
 };
-use custom_widgets::CurlmanWidget;
+
+use editor::CurlmanWidget;
 use ratatui::{layout::Layout, prelude::*, widgets::WidgetRef, DefaultTerminal};
 use std::collections::HashMap;
 
@@ -149,11 +152,11 @@ fn main() -> std::io::Result<()> {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Fill(1)]);
 
-    let editor_widget = Box::new(custom_widgets::Editor::default());
+    let editor_widget = Box::new(editor::Editor::default());
 
     let widgets = vec![
         PaneWidget::new(
-            Box::new(custom_widgets::RequestBrowser::default()),
+            Box::new(editor::RequestBrowser::default()),
             0,
             AvailableDirections::NONE,
         ),
