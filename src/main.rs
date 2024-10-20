@@ -10,63 +10,9 @@ use crossterm::{
     terminal::disable_raw_mode,
 };
 
-use editor::CurlmanWidget;
 use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
-
-struct PaneParent {
-    layout_idx: u32,
-    layout_pos_idx: usize,
-}
-
-const UP: u8 = 1;
-const DOWN: u8 = 2;
-const RIGHT: u8 = 3;
-const LEFT: u8 = 4;
-
-struct TargetId(usize);
-struct AvailableDirections([TargetId; 4]);
-
-impl AvailableDirections {
-    const NONE: Self = AvailableDirections([TargetId(0), TargetId(0), TargetId(0), TargetId(0)]);
-}
-
-struct PaneWidget {
-    widget: Box<dyn CurlmanWidget>,
-    layout_idx: usize,
-    available_directions: AvailableDirections,
-}
-
-impl PaneWidget {
-    fn new(
-        widget: Box<dyn CurlmanWidget>,
-        layout_id: usize,
-        available_directions: AvailableDirections,
-    ) -> Self {
-        PaneWidget {
-            widget,
-            layout_idx: layout_id,
-            available_directions,
-        }
-    }
-}
-
-// A pane has a layout and an id, meaning that ever
-struct Pane {
-    parent: Option<PaneParent>,
-    layout_id: u32,
-    widgets: Vec<PaneWidget>,
-}
-
-impl Pane {
-    fn new(widgets: Vec<PaneWidget>, parent: Option<PaneParent>, layout_id: u32) -> Self {
-        Pane {
-            widgets,
-            parent,
-            layout_id,
-        }
-    }
-}
+use types::{AvailableDirections, Pane, PaneParent, PaneWidget};
 
 struct App {
     panes: HashMap<u32, Pane>,

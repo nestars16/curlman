@@ -1,14 +1,16 @@
 use curl::easy::Easy;
 
-use crate::{error::Error, types::RequestInfo};
+use crate::{error::Error, types::RequestInfo, App};
 
-fn perform(req: RequestInfo) -> Result<(), Error> {
-    let mut handle = Easy::new();
+impl App {
+    fn perform(req: RequestInfo) -> Result<(), Error> {
+        let mut handle = Easy::new();
 
-    let Some(url) = req.url else {
-        return Err(Error::InvalidUrl);
-    };
+        let Some(url) = req.url else {
+            return Err(Error::InvalidUrl);
+        };
 
-    handle.url(&url.to_string()).unwrap();
-    Ok(())
+        handle.url(&url.to_string()).unwrap();
+        Ok(())
+    }
 }
