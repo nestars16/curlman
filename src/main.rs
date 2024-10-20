@@ -1,15 +1,17 @@
+mod curl;
 mod editor;
+mod error;
 mod parser;
 mod types;
 
 use crossterm::terminal::enable_raw_mode;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, *},
+    event::{self, KeyCode, KeyEventKind},
     terminal::disable_raw_mode,
 };
 
 use editor::CurlmanWidget;
-use ratatui::{layout::Layout, prelude::*, widgets::WidgetRef, DefaultTerminal};
+use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
 
 struct PaneParent {
@@ -170,6 +172,7 @@ fn main() -> std::io::Result<()> {
     let mut app = App::new(panes, layouts, 0, 1);
 
     app.run(&mut terminal)?;
+
     ratatui::restore();
     disable_raw_mode()?;
 
