@@ -11,10 +11,11 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph, WidgetRef},
 };
 
+use crate::keys;
+
 pub enum VimMode {
     Normal,
     Insert,
-    Visual,
 }
 
 pub enum VimState {
@@ -110,7 +111,6 @@ pub enum EditorMode {
         mode: VimMode,
         state: VimEditorState,
     },
-    Regular,
 }
 
 pub struct Editor<'editor> {
@@ -197,15 +197,13 @@ impl<'editor> Editor<'editor> {
         Text::from(lines)
     }
 
-    fn handle_input(&mut self, event: Event) {
+    fn handle_input(&mut self, event: Event) -> Option<WidgetCommand> {
         match event {
             Event::Key(key_event) => match self.current_mode {
                 EditorMode::Vim { ref mode, .. } => match mode {
-                    VimMode::Normal => self.handle_vim_motions(key_event),
+                    VimMode::Normal => return self.handle_vim_motions(key_event),
                     VimMode::Insert => self.handle_key_events(key_event),
-                    VimMode::Visual => todo!(),
                 },
-                EditorMode::Regular => self.handle_key_events(key_event),
             },
             Event::Mouse(mouse_event) => {}
             Event::Paste(_) => {}
@@ -213,6 +211,8 @@ impl<'editor> Editor<'editor> {
             Event::FocusLost => {}
             Event::Resize(_, _) => {}
         };
+
+        None
     }
 
     fn handle_key_events(&mut self, event: KeyEvent) {
@@ -326,17 +326,45 @@ impl<'editor> Editor<'editor> {
         }
     }
 
-    fn handle_vim_motions(&mut self, e: KeyEvent) {
-        let mut command_to_exec = None;
+    fn handle_vim_motions(&mut self, e: KeyEvent) -> Option<WidgetCommand> {
         let EditorMode::Vim { ref mode, state } = &mut self.current_mode else {
-            return;
+            return None;
         };
 
         if !matches!(mode, VimMode::Normal) {
-            return;
+            return None;
         }
 
+        let mut vim_command_to_exec = None;
+
         match e {
+            KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => match ch {
+                keys::UP => {
+                    return Some(WidgetCommand::MoveSelection {
+                        direction: keys::Direction::Up,
+                    })
+                }
+                keys::DOWN => {
+                    return Some(WidgetCommand::MoveSelection {
+                        direction: keys::Direction::Down,
+                    })
+                }
+                keys::LEFT => {
+                    return Some(WidgetCommand::MoveSelection {
+                        direction: keys::Direction::Left,
+                    })
+                }
+                keys::RIGHT => {
+                    return Some(WidgetCommand::MoveSelection {
+                        direction: keys::Direction::Right,
+                    })
+                }
+                _ => {}
+            },
             KeyEvent {
                 code: KeyCode::Char(ch),
                 ..
@@ -351,7 +379,7 @@ impl<'editor> Editor<'editor> {
                         {
                             state.motion_buffer = [' ', ' ', ' '];
                             state.current_state = VimState::AwaitingFirstInput;
-                            command_to_exec = Some(command);
+                            vim_command_to_exec = Some(command);
                         };
                     }
                 }
@@ -366,7 +394,7 @@ impl<'editor> Editor<'editor> {
                         Ok(command) => {
                             state.current_state = VimState::AwaitingFirstInput;
                             state.motion_buffer = [' ', ' ', ' '];
-                            command_to_exec = Some(command);
+                            vim_command_to_exec = Some(command);
                         }
                         Err(_) => {
                             if state.motion_buffer[2] != ' ' {
@@ -380,9 +408,11 @@ impl<'editor> Editor<'editor> {
             _ => {}
         };
 
-        if let Some(command) = command_to_exec {
+        if let Some(command) = vim_command_to_exec {
             self.handle_commands(command)
         }
+
+        None
     }
 
     fn switch_to_normal_mode(&mut self) {
@@ -580,14 +610,18 @@ impl<'editor> WidgetRef for Editor<'editor> {
     }
 }
 
+pub enum WidgetCommand {
+    MoveSelection { direction: keys::Direction },
+}
+
 pub trait InputListener {
-    fn handle_event(&mut self, e: Event);
+    fn handle_event(&mut self, e: Event) -> Option<WidgetCommand>;
 }
 
 pub trait CurlmanWidget: InputListener + WidgetRef {}
 
 impl<'editor> InputListener for Editor<'editor> {
-    fn handle_event(&mut self, e: Event) {
+    fn handle_event(&mut self, e: Event) -> Option<WidgetCommand> {
         self.handle_input(e)
     }
 }
@@ -607,7 +641,9 @@ impl<'browser> WidgetRef for RequestBrowser<'browser> {
 }
 
 impl<'browser> InputListener for RequestBrowser<'browser> {
-    fn handle_event(&mut self, e: Event) {}
+    fn handle_event(&mut self, e: Event) -> Option<WidgetCommand> {
+        None
+    }
 }
 
 impl<'browser> Default for RequestBrowser<'browser> {

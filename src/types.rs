@@ -1,4 +1,4 @@
-use crate::editor::CurlmanWidget;
+use crate::{editor::CurlmanWidget, keys};
 use http::method::Method;
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use url::Url;
@@ -8,30 +8,26 @@ pub struct PaneParent {
     pub layout_pos_idx: usize,
 }
 
-const UP: u8 = 1;
-const DOWN: u8 = 2;
-const RIGHT: u8 = 3;
-const LEFT: u8 = 4;
+#[derive(Clone)]
+pub struct TargetId(pub usize);
 
-struct TargetId(usize);
-pub struct AvailableDirections([TargetId; 4]);
+pub struct DirectionArray(pub [Option<TargetId>; 4]);
 
-impl AvailableDirections {
-    pub const NONE: Self =
-        AvailableDirections([TargetId(0), TargetId(0), TargetId(0), TargetId(0)]);
+impl DirectionArray {
+    pub const NONE: Self = DirectionArray([None, None, None, None]);
 }
 
 pub struct PaneWidget {
     pub widget: Box<dyn CurlmanWidget>,
     pub layout_idx: usize,
-    pub available_directions: AvailableDirections,
+    pub available_directions: DirectionArray,
 }
 
 impl PaneWidget {
     pub fn new(
         widget: Box<dyn CurlmanWidget>,
         layout_id: usize,
-        available_directions: AvailableDirections,
+        available_directions: DirectionArray,
     ) -> Self {
         PaneWidget {
             widget,
@@ -55,6 +51,23 @@ impl Pane {
             parent,
             layout_id,
         }
+    }
+
+    pub fn get_next_widget_idx(
+        &self,
+        current_widget_idx: usize,
+        direction_to_move: keys::Direction,
+    ) -> Option<usize> {
+        let Some(widget) = self.widgets.get(current_widget_idx) else {
+            return None;
+        };
+
+        let Some(new_widget_id) = widget.available_directions.0[direction_to_move as usize].clone()
+        else {
+            return None;
+        };
+
+        Some(new_widget_id.0)
     }
 }
 

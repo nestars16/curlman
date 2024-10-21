@@ -1,8 +1,9 @@
 use crate::{
-    editor::{self, CurlmanWidget, InputListener},
+    editor::{self, CurlmanWidget, InputListener, WidgetCommand},
     error::Error,
     types::RequestInfo,
 };
+use crossterm::event::{KeyEvent, KeyEventKind};
 use curl::easy::{Easy, List, ReadError};
 use http::Method;
 use ratatui::{
@@ -76,8 +77,15 @@ impl WidgetRef for RequestExecutor {
 }
 
 impl InputListener for RequestExecutor {
-    fn handle_event(&mut self, e: crossterm::event::Event) {
-        todo!()
+    fn handle_event(&mut self, e: crossterm::event::Event) -> Option<WidgetCommand> {
+        match e {
+            crossterm::event::Event::FocusGained => todo!(),
+            crossterm::event::Event::FocusLost => todo!(),
+            crossterm::event::Event::Key(key_event) => todo!(),
+            crossterm::event::Event::Mouse(mouse_event) => todo!(),
+            crossterm::event::Event::Paste(_) => todo!(),
+            crossterm::event::Event::Resize(_, _) => todo!(),
+        }
     }
 }
 

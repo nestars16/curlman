@@ -6,18 +6,44 @@ mod types;
 
 use crossterm::terminal::enable_raw_mode;
 use crossterm::{
-    event::{self, KeyCode, KeyEventKind},
+    event::{self},
     terminal::disable_raw_mode,
 };
+use editor::WidgetCommand;
 use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
-use types::{AvailableDirections, Pane, PaneParent, PaneWidget};
+use types::{DirectionArray, Pane, PaneParent, PaneWidget, TargetId};
 
 struct App {
     panes: HashMap<u32, Pane>,
     layouts: HashMap<u32, Layout>,
     selected_pane_id: u32,
     selected_widget_idx: usize,
+}
+
+pub mod keys {
+    pub const UP: char = 'k';
+    pub const DOWN: char = 'j';
+    pub const LEFT: char = 'h';
+    pub const RIGHT: char = 'l';
+
+    pub enum Direction {
+        Up,
+        Down,
+        Left,
+        Right,
+    }
+
+    impl From<Direction> for usize {
+        fn from(value: Direction) -> Self {
+            match value {
+                Direction::Up => 0,
+                Direction::Down => 1,
+                Direction::Left => 2,
+                Direction::Right => 3,
+            }
+        }
+    }
 }
 
 impl App {
@@ -46,6 +72,8 @@ impl App {
             selected_widget_idx: default_widget_idx,
         }
     }
+
+    fn handle_widget_command(&mut self, cmd: WidgetCommand, pane: &mut Pane) {}
 
     fn run(&mut self, term: &mut DefaultTerminal) -> std::io::Result<()> {
         loop {
@@ -77,15 +105,28 @@ impl App {
 
             let event = event::read()?;
 
-            if let event::Event::Key(key) = event {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                    return Ok(());
-                }
-            }
+            let selected_pane = self
+                .panes
+                .get_mut(&self.selected_pane_id)
+                .expect("Id not in panes");
 
-            self.panes.get_mut(&self.selected_pane_id).unwrap().widgets[self.selected_widget_idx]
-                .widget
-                .handle_event(event)
+            let selected_pane_widget = selected_pane
+                .widgets
+                .get_mut(self.selected_widget_idx)
+                .expect("Id not in widgets");
+
+            match selected_pane_widget.widget.handle_event(event) {
+                Some(cmd) => match cmd {
+                    WidgetCommand::MoveSelection { direction } => {
+                        if let Some(new_widget_idx) =
+                            selected_pane.get_next_widget_idx(self.selected_widget_idx, direction)
+                        {
+                            self.selected_widget_idx = new_widget_idx;
+                        }
+                    }
+                },
+                None => {}
+            };
         }
     }
 }
@@ -97,12 +138,21 @@ fn main() -> std::io::Result<()> {
     let parent_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)]);
+
     let editor_widget = Box::new(editor::Editor::default());
     let output_widget = Box::new(curl::RequestExecutor::default());
 
     let widgets = vec![
-        PaneWidget::new(editor_widget, 0, AvailableDirections::NONE),
-        PaneWidget::new(output_widget, 1, AvailableDirections::NONE),
+        PaneWidget::new(
+            editor_widget,
+            0,
+            DirectionArray([None, None, None, Some(TargetId(1))]),
+        ),
+        PaneWidget::new(
+            output_widget,
+            1,
+            DirectionArray([None, None, Some(TargetId(0)), None]),
+        ),
     ];
 
     let layouts = vec![parent_layout];
