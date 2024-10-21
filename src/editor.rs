@@ -520,11 +520,6 @@ impl<'editor> Editor<'editor> {
         let curr_offset = self.cursor - line_start;
         let target = line_end + curr_offset;
 
-        eprintln!(
-            "- Our current line end index is {}\n\tOur offset is {}\n\tOur line_start is {} which corresponds to letter {:?}\n\tOur target would be {} or {}\n\tour cursor is {}",
-            line_end, curr_offset, line_start, self.text_buffer.get(line_start +1), target, next_line_end.unwrap_or(1) - 1, self.cursor
-        );
-
         //Here we check if needs to bounds check, if there is no
         //next line after our line end then we can just
         //check our current line offset and see if it fits in the next line
@@ -581,7 +576,6 @@ impl<'editor> WidgetRef for Editor<'editor> {
         let text_area = self.block.inner(area);
         let inner = Paragraph::new(self.get_editor_text());
         self.block.clone().render(area, buf);
-
         inner.render(text_area, buf);
     }
 }

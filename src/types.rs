@@ -1,8 +1,7 @@
-use http::Method;
+use crate::editor::CurlmanWidget;
+use http::method::Method;
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use url::Url;
-
-use crate::editor::CurlmanWidget;
 
 pub struct PaneParent {
     pub layout_idx: u32,
@@ -65,6 +64,7 @@ pub struct RequestInfo {
     pub url: Option<Url>,
     pub method: Method,
     pub timeout: Duration,
+    pub body: Option<Vec<u8>>,
 }
 
 impl Default for RequestInfo {
@@ -74,6 +74,7 @@ impl Default for RequestInfo {
             method: Method::GET,
             url: None,
             timeout: Duration::from_secs(30),
+            body: None,
         }
     }
 }

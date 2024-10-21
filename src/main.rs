@@ -9,7 +9,6 @@ use crossterm::{
     event::{self, KeyCode, KeyEventKind},
     terminal::disable_raw_mode,
 };
-
 use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
 use types::{AvailableDirections, Pane, PaneParent, PaneWidget};
@@ -68,7 +67,7 @@ impl App {
                     for PaneWidget {
                         widget,
                         layout_idx: layout_id,
-                        available_directions,
+                        ..
                     } in pane.widgets.iter()
                     {
                         widget.render_ref(widget_layout[*layout_id], frame.buffer_mut())
@@ -95,32 +94,22 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     terminal.clear()?;
     enable_raw_mode()?;
-
     let parent_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(20), Constraint::Fill(1)]);
-
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)]);
     let editor_widget = Box::new(editor::Editor::default());
+    let output_widget = Box::new(curl::RequestExecutor::default());
 
     let widgets = vec![
-        PaneWidget::new(
-            Box::new(editor::RequestBrowser::default()),
-            0,
-            AvailableDirections::NONE,
-        ),
-        PaneWidget::new(editor_widget, 1, AvailableDirections::NONE),
+        PaneWidget::new(editor_widget, 0, AvailableDirections::NONE),
+        PaneWidget::new(output_widget, 1, AvailableDirections::NONE),
     ];
 
     let layouts = vec![parent_layout];
-
     let panes = vec![Pane::new(widgets, None, 0)];
-
-    let mut app = App::new(panes, layouts, 0, 1);
-
+    let mut app = App::new(panes, layouts, 0, 0);
     app.run(&mut terminal)?;
-
     ratatui::restore();
     disable_raw_mode()?;
-
     Ok(())
 }
