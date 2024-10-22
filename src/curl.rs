@@ -12,6 +12,7 @@ use http::Method;
 use ratatui::{
     buffer::{self, Buffer},
     layout::Rect,
+    style::{Style, Stylize},
     text::Text,
     widgets::{Block, Widget, WidgetRef},
 };
@@ -24,6 +25,7 @@ pub struct RequestExecutor {
     output_data: Vec<u8>,
     block: Block<'static>,
     buffer: Arc<RwLock<GapBuffer<char>>>,
+    selected: bool,
 }
 
 impl RequestExecutor {
@@ -32,6 +34,7 @@ impl RequestExecutor {
             output_data: Vec::new(),
             block: editor::get_round_bordered_box(),
             buffer,
+            selected: false,
         }
     }
 
@@ -159,4 +162,14 @@ impl InputListener for RequestExecutor {
     }
 }
 
-impl CurlmanWidget for RequestExecutor {}
+impl CurlmanWidget for RequestExecutor {
+    fn toggle_selected(&mut self) {
+        self.selected = !self.selected;
+
+        if self.selected {
+            self.block = Block::bordered().border_style(Style::new().red());
+        } else {
+            self.block = Block::bordered();
+        }
+    }
+}

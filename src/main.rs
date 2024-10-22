@@ -9,12 +9,11 @@ use crossterm::{
     event::{self},
     terminal::disable_raw_mode,
 };
-use editor::WidgetCommand;
+use editor::{CurlmanWidget, WidgetCommand};
 use gapbuf::GapBuffer;
 use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use types::{DirectionArray, Pane, PaneParent, PaneWidget, TargetId};
 
 struct App {
@@ -85,7 +84,10 @@ impl App {
                         layout_pos_idx,
                     }) = pane.parent
                     {
-                        let parent_layout = self.layouts.get(&layout_idx).unwrap();
+                        let parent_layout = self
+                            .layouts
+                            .get(&layout_idx)
+                            .expect("LAYOUT IDX MUST EXIST");
 
                         self.layouts[&pane.layout_id]
                             .split(parent_layout.split(frame.area())[layout_pos_idx])
@@ -116,14 +118,22 @@ impl App {
                 .get_mut(self.selected_widget_idx)
                 .expect("Id not in widgets");
 
-            match selected_pane_widget.widget.handle_event(event) {
+            let selected_pane_widget_inner = &mut selected_pane_widget.widget;
+
+            match selected_pane_widget_inner.handle_event(event) {
                 Some(cmd) => match cmd {
                     WidgetCommand::MoveSelection { direction } => {
+                        selected_pane_widget_inner.toggle_selected();
+
                         if let Some(new_widget_idx) =
                             selected_pane.get_next_widget_idx(self.selected_widget_idx, direction)
                         {
                             self.selected_widget_idx = new_widget_idx;
                         }
+
+                        selected_pane.widgets[self.selected_widget_idx]
+                            .widget
+                            .toggle_selected();
                     }
                 },
                 None => {}
@@ -162,7 +172,9 @@ fn main() -> std::io::Result<()> {
     let layouts = vec![parent_layout];
     let panes = vec![Pane::new(widgets, None, 0)];
     let mut app = App::new(panes, layouts, 0, 0);
+
     app.run(&mut terminal)?;
+
     ratatui::restore();
     disable_raw_mode()?;
     Ok(())

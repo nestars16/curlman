@@ -82,13 +82,14 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
     let (input, _) = tag("curl ")(input)?;
     let (input, url_str) = take_till(char::is_whitespace)(input)?;
     let url_res: Result<Url, _> = url_str.parse();
+
     let Ok(url) = url_res else {
         return Err(nom::Err::Failure(Error {
             input,
             code: ErrorKind::IsNot,
         }));
     };
-    let (input, _) = multispace1(input)?;
+    let (input, _) = multispace0(input)?;
     let (input, mut request_builder) = parse_curl_params(input)?;
     request_builder.url = Some(url);
     Ok((input, request_builder))
