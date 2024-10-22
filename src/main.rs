@@ -10,8 +10,11 @@ use crossterm::{
     terminal::disable_raw_mode,
 };
 use editor::WidgetCommand;
+use gapbuf::GapBuffer;
 use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, RwLock};
 use types::{DirectionArray, Pane, PaneParent, PaneWidget, TargetId};
 
 struct App {
@@ -73,8 +76,6 @@ impl App {
         }
     }
 
-    fn handle_widget_command(&mut self, cmd: WidgetCommand, pane: &mut Pane) {}
-
     fn run(&mut self, term: &mut DefaultTerminal) -> std::io::Result<()> {
         loop {
             term.draw(|frame| {
@@ -135,12 +136,15 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     terminal.clear()?;
     enable_raw_mode()?;
+
     let parent_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)]);
 
-    let editor_widget = Box::new(editor::Editor::default());
-    let output_widget = Box::new(curl::RequestExecutor::default());
+    let buffer = Arc::new(RwLock::new(GapBuffer::new()));
+    let output = curl::RequestExecutor::new(Arc::clone(&buffer));
+    let editor_widget = Box::new(editor::Editor::new(buffer));
+    let output_widget = Box::new(output);
 
     let widgets = vec![
         PaneWidget::new(

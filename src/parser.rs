@@ -77,7 +77,7 @@ fn parse_curl_params(input: &str) -> IResult<&str, RequestInfo> {
     Ok((input, request_info))
 }
 
-fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
+pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("curl ")(input)?;
     let (input, url_str) = take_till(char::is_whitespace)(input)?;

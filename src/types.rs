@@ -10,7 +10,6 @@ pub struct PaneParent {
 
 #[derive(Clone)]
 pub struct TargetId(pub usize);
-
 pub struct DirectionArray(pub [Option<TargetId>; 4]);
 
 impl DirectionArray {

@@ -1,7 +1,9 @@
+#[derive(Debug)]
 pub enum Error {
     InvalidUrl,
     Curl(curl::Error),
     NoBody,
+    ParserError,
 }
 
 impl From<curl::Error> for Error {

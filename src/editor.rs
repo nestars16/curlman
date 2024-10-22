@@ -1,4 +1,11 @@
-use std::char;
+use std::{
+    char,
+    rc::Rc,
+    sync::{
+        mpsc::{Sender, SyncSender},
+        Arc, RwLock,
+    },
+};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -11,7 +18,7 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph, WidgetRef},
 };
 
-use crate::keys;
+use crate::{keys, types::RequestInfo};
 
 pub enum VimMode {
     Normal,
@@ -115,17 +122,17 @@ pub enum EditorMode {
 
 pub struct Editor<'editor> {
     cursor: usize, //Its always pointing to the index in which a character would be inserted
-    text_buffer: GapBuffer<char>,
+    pub text_buffer: Arc<RwLock<GapBuffer<char>>>,
     block: Block<'editor>,
     tab_len: u8,
     current_mode: EditorMode,
 }
 
-impl<'editor> Default for Editor<'editor> {
-    fn default() -> Self {
-        Editor {
+impl<'editor> Editor<'editor> {
+    pub fn new(text_buffer: Arc<RwLock<GapBuffer<char>>>) -> Self {
+        Self {
             cursor: 0,
-            text_buffer: gap_buffer![],
+            text_buffer,
             block: get_round_bordered_box(),
             tab_len: 4,
             current_mode: EditorMode::Vim {
@@ -138,15 +145,13 @@ impl<'editor> Default for Editor<'editor> {
             },
         }
     }
-}
 
-impl<'editor> Editor<'editor> {
     fn get_editor_text(&self) -> Text {
         let mut char_buf = String::new();
         let mut spans = Vec::new();
         let mut lines = Vec::new();
 
-        if self.text_buffer.is_empty() {
+        if self.text_buffer.read().unwrap().is_empty() {
             return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
         }
 
@@ -156,7 +161,7 @@ impl<'editor> Editor<'editor> {
             self.cursor
         };
 
-        for (i, ch) in self.text_buffer.iter().enumerate() {
+        for (i, ch) in self.text_buffer.read().unwrap().iter().enumerate() {
             if *ch == '\n' {
                 if !char_buf.is_empty() {
                     spans.push(Span::from(std::mem::take(&mut char_buf)));
@@ -292,7 +297,7 @@ impl<'editor> Editor<'editor> {
                 VimOperator::Down => {}
                 VimOperator::Left => {
                     if self.cursor > 2 {
-                        self.text_buffer.remove(self.cursor - 2);
+                        self.text_buffer.write().unwrap().remove(self.cursor - 2);
                         self.cursor -= 1;
                     }
                 }
@@ -303,21 +308,32 @@ impl<'editor> Editor<'editor> {
                     let mut stop: Option<usize> = None;
                     let line_end_idx = self.get_line_end();
                     for i in self.cursor..=line_end_idx {
-                        if self.text_buffer.get(i).is_some_and(|ch| *ch == char) {
+                        if self
+                            .text_buffer
+                            .read()
+                            .unwrap()
+                            .get(i)
+                            .is_some_and(|ch| *ch == char)
+                        {
                             stop = Some(i)
                         }
                     }
 
                     if let Some(stop) = stop {
-                        self.text_buffer.drain((self.cursor - 1)..=stop);
+                        self.text_buffer
+                            .write()
+                            .unwrap()
+                            .drain((self.cursor - 1)..=stop);
                     }
                 }
                 VimOperator::Whole => {
                     self.text_buffer
+                        .write()
+                        .unwrap()
                         .drain(self.get_line_start()..self.get_line_end());
 
-                    if self.cursor > self.text_buffer.len() {
-                        self.cursor = self.text_buffer.len()
+                    if self.cursor > self.text_buffer.read().unwrap().len() {
+                        self.cursor = self.text_buffer.read().unwrap().len()
                     }
                 }
             },
@@ -434,27 +450,35 @@ impl<'editor> Editor<'editor> {
     }
 
     fn insert_char(&mut self, ch: char) {
-        self.text_buffer.insert(self.cursor, ch);
+        self.text_buffer.write().unwrap().insert(self.cursor, ch);
         self.cursor += 1;
     }
 
     fn insert_newline(&mut self) {
-        self.text_buffer.insert(self.cursor, '\n');
+        self.text_buffer.write().unwrap().insert(self.cursor, '\n');
         self.cursor += 1;
     }
 
     fn insert_tab(&mut self) {
         self.text_buffer
+            .write()
+            .unwrap()
             .insert_many(self.cursor, (0..self.tab_len).map(|_| ' '));
 
         self.cursor += self.tab_len as usize;
     }
 
     fn get_line_end(&self) -> usize {
-        let mut line_end_idx = self.text_buffer.len() - 1;
+        let mut line_end_idx = self.text_buffer.read().unwrap().len() - 1;
 
-        for i in self.cursor..self.text_buffer.len() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+        for i in self.cursor..self.text_buffer.read().unwrap().len() {
+            if self
+                .text_buffer
+                .read()
+                .unwrap()
+                .get(i)
+                .is_some_and(|ch| *ch == '\n')
+            {
                 line_end_idx = i;
                 break;
             }
@@ -466,7 +490,13 @@ impl<'editor> Editor<'editor> {
     fn get_line_start(&self) -> usize {
         let mut line_start_idx = 0;
         for i in (0..self.cursor).rev() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+            if self
+                .text_buffer
+                .read()
+                .unwrap()
+                .get(i)
+                .is_some_and(|ch| *ch == '\n')
+            {
                 line_start_idx = i as i32;
                 break;
             }
@@ -486,7 +516,13 @@ impl<'editor> Editor<'editor> {
         let mut prev_line_start = None;
 
         for i in (0..line_start).rev() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+            if self
+                .text_buffer
+                .read()
+                .unwrap()
+                .get(i)
+                .is_some_and(|ch| *ch == '\n')
+            {
                 prev_line_start = Some(i);
                 break;
             }
@@ -525,8 +561,14 @@ impl<'editor> Editor<'editor> {
         let mut next_line_end: Option<usize> = None;
         let mut newline_count = 0;
 
-        for i in self.cursor..self.text_buffer.len() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
+        for i in self.cursor..self.text_buffer.read().unwrap().len() {
+            if self
+                .text_buffer
+                .read()
+                .unwrap()
+                .get(i)
+                .is_some_and(|ch| *ch == '\n')
+            {
                 match newline_count {
                     0 => {
                         line_end = Some(i);
@@ -555,10 +597,10 @@ impl<'editor> Editor<'editor> {
         //check our current line offset and see if it fits in the next line
         //if it doesn't then we just set it at the end of the line
         let Some(next_line_end) = next_line_end else {
-            self.cursor = if target < self.text_buffer.len() {
+            self.cursor = if target < self.text_buffer.read().unwrap().len() {
                 target
             } else {
-                self.text_buffer.len()
+                self.text_buffer.read().unwrap().len()
             };
             return;
         };
@@ -571,7 +613,7 @@ impl<'editor> Editor<'editor> {
     }
 
     fn move_right(&mut self) {
-        if self.cursor >= self.text_buffer.len() {
+        if self.cursor >= self.text_buffer.read().unwrap().len() {
             return;
         }
 
@@ -588,13 +630,13 @@ impl<'editor> Editor<'editor> {
 
     fn backspace_delete(&mut self) {
         if self.cursor < 1 {
-            if !self.text_buffer.is_empty() {
-                self.text_buffer.remove(0);
+            if !self.text_buffer.read().unwrap().is_empty() {
+                self.text_buffer.write().unwrap().remove(0);
             }
             return;
         }
 
-        self.text_buffer.remove(self.cursor - 1);
+        self.text_buffer.write().unwrap().remove(self.cursor - 1);
         self.cursor -= 1;
     }
 }
