@@ -13,15 +13,25 @@ use editor::{CurlmanWidget, WidgetCommand};
 use gapbuf::GapBuffer;
 use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::{Arc, RwLock};
 use types::{DirectionArray, Pane, PaneParent, PaneWidget, TargetId};
 
 struct App {
+    request_file: Option<File>,
     panes: HashMap<u32, Pane>,
     layouts: HashMap<u32, Layout>,
     selected_pane_id: u32,
     selected_widget_idx: usize,
 }
+
+//TODO
+//storage format
+//request browser
+//json parsing and output
+//finishing vim keybinds
+//syntax highlighting (json editor)
+//correct error handling and ui
 
 pub mod keys {
     pub const UP: char = 'k';
@@ -54,6 +64,7 @@ impl App {
         layouts: Vec<Layout>,
         default_pane_id: u32,
         default_widget_idx: usize,
+        file: Option<File>,
     ) -> Self {
         assert_eq!(panes.len(), layouts.len());
 
@@ -68,6 +79,7 @@ impl App {
             .map(|(idx, layout)| (idx as u32, layout));
 
         App {
+            request_file: file,
             panes: HashMap::from_iter(pane_map_iter),
             layouts: HashMap::from_iter(layout_map_iter),
             selected_pane_id: default_pane_id,
@@ -171,7 +183,7 @@ fn main() -> std::io::Result<()> {
 
     let layouts = vec![parent_layout];
     let panes = vec![Pane::new(widgets, None, 0)];
-    let mut app = App::new(panes, layouts, 0, 0);
+    let mut app = App::new(panes, layouts, 0, 0, None);
 
     app.run(&mut terminal)?;
 

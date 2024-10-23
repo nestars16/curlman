@@ -9,9 +9,8 @@ use std::{
     },
 };
 
-//TODO
-//Add vertical scrolling of text
-//add command bar
+//TODO?
+//Add vertical scrolling of text?
 //timeout for motions?
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -67,6 +66,8 @@ impl TryFrom<char> for VimOperator {
         match value {
             'k' => Ok(Self::Up),
             'j' => Ok(Self::Down),
+            '$' => Ok(Self::UntilEnd),
+            '0' => Ok(Self::UntilStart),
             'h' => Ok(Self::Left),
             'l' => Ok(Self::Right),
             'd' | 'y' => Ok(Self::Whole),
@@ -349,7 +350,9 @@ impl<'editor> Editor<'editor> {
                 }
                 VimOperator::Until(char) => {
                     let mut stop: Option<usize> = None;
+
                     let line_end_idx = self.get_line_end();
+
                     for i in self.cursor..=line_end_idx {
                         if self
                             .text_buffer
@@ -358,7 +361,8 @@ impl<'editor> Editor<'editor> {
                             .get(i)
                             .is_some_and(|ch| *ch == char)
                         {
-                            stop = Some(i)
+                            stop = Some(i);
+                            break;
                         }
                     }
 
@@ -369,16 +373,7 @@ impl<'editor> Editor<'editor> {
                             .drain((self.cursor - 1)..=stop);
                     }
                 }
-                VimOperator::Whole => {
-                    self.text_buffer
-                        .write()
-                        .unwrap()
-                        .drain(self.get_line_start()..self.get_line_end());
-
-                    if self.cursor > self.text_buffer.read().unwrap().len() {
-                        self.cursor = self.text_buffer.read().unwrap().len()
-                    }
-                }
+                VimOperator::Whole => {}
                 VimOperator::UntilEnd => {
                     self.text_buffer
                         .write()
@@ -471,16 +466,12 @@ impl<'editor> Editor<'editor> {
 
                     match TryInto::<VimMotion>::try_into(state.motion_buffer) {
                         Ok(command) => {
-                            eprintln!("Got command {:?}", command);
                             vim_command_to_exec = Some(command);
                             state.clear();
-                            eprintln!("State : {state:?}");
                         }
                         Err(_) => {
-                            eprintln!("Failed with motion buffer {:?}", state.motion_buffer);
                             if state.motion_buffer[2] != ' ' {
                                 state.clear();
-                                eprintln!("Clearing state {:?}", state);
                             }
                         }
                     }
@@ -491,7 +482,7 @@ impl<'editor> Editor<'editor> {
         };
 
         if let Some(command) = vim_command_to_exec {
-            self.handle_motions(command)
+            self.handle_motions(command);
         }
 
         None
@@ -652,11 +643,6 @@ impl<'editor> Editor<'editor> {
         let line_start = self.get_line_start();
         let curr_offset = self.cursor - line_start;
         let target = line_end + curr_offset;
-
-        eprintln!(
-            "- Our current line end index is {}\n\tOur offset is {}\n\tOur line_start is {} which corresponds to letter {:?}\n\tOur target would be {} or {}\n\tour cursor is {}",
-            line_end, curr_offset, line_start, self.text_buffer.read().unwrap().get(line_start +1), target, next_line_end.unwrap_or(1) - 1, self.cursor
-        );
 
         //Here we check if needs to bounds check, if there is no
         //next line after our line end then we can just

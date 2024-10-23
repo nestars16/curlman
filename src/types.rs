@@ -70,7 +70,7 @@ impl Pane {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct RequestInfo {
     pub headers: HashMap<String, String>,
     pub url: Option<Url>,

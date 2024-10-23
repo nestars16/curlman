@@ -5,14 +5,14 @@ use nom::{
     character::complete::{multispace0, multispace1},
     error::{Error, ErrorKind},
     multi::separated_list0,
-    sequence::{delimited, separated_pair},
+    sequence::{delimited, pair, separated_pair, tuple},
     IResult,
 };
 
-//TODO
-//CONSIDER CURL REDIRECT FLAG
-//consider basic auth
-//file uploads
+//TODO?
+//CONSIDER CURL REDIRECT FLAG?
+//consider basic auth?
+//file uploads?
 
 use url::{self, Url};
 
@@ -26,14 +26,18 @@ fn parse_curl_params(input: &str) -> IResult<&str, RequestInfo> {
 
     let tag_parser = take_while(|ch: char| !ch.is_whitespace());
 
+    let param_separator = tuple((multispace1, take_till(|ch: char| ch == '-')));
+
     let (input, params) = separated_list0(
-        multispace1,
+        param_separator,
         separated_pair(
             take_till(char::is_whitespace),
             multispace1,
             alt((string_parser, tag_parser)),
         ),
     )(input)?;
+
+    dbg!(&params);
 
     let mut request_info = RequestInfo::default();
 
@@ -79,7 +83,8 @@ fn parse_curl_params(input: &str) -> IResult<&str, RequestInfo> {
 
 pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
     let (input, _) = multispace0(input)?;
-    let (input, _) = tag("curl ")(input)?;
+    let (input, _) = tag("curl")(input)?;
+    let (input, _) = multispace0(input)?;
     let (input, url_str) = take_till(char::is_whitespace)(input)?;
     let url_res: Result<Url, _> = url_str.parse();
 
@@ -89,10 +94,25 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
             code: ErrorKind::IsNot,
         }));
     };
+
     let (input, _) = multispace0(input)?;
     let (input, mut request_builder) = parse_curl_params(input)?;
+
     request_builder.url = Some(url);
     Ok((input, request_builder))
+}
+
+struct Request {
+    info: RequestInfo,
+    name: String,
+}
+
+pub fn parse_curlman_request_file(input: &str) -> IResult<&str, Vec<RequestInfo>> {
+    let separator = pair(multispace0, tag("==="));
+
+    let (input, requests) = separated_list0(separator, parse_curlman_request)(input)?;
+
+    Ok((input, requests))
 }
 
 #[cfg(test)]
@@ -104,11 +124,33 @@ mod tests {
             curl http://example.com
             -X GET
             -H "Authorization: Bearer ${TOKEN}"
-            --data '{"json"  : "lol"}'
-        "#;
+    "#;
 
         let res = parse_curlman_request(input);
-        dbg!(&res);
+
+        assert!(res.is_ok())
+    }
+
+    #[test]
+    fn test_file_parser() {
+        let input = r#"
+
+            curl http://example.com
+            -X POST 
+            -H "Authorization: Bearer ${TOKEN}"
+            --data '{"json"  : "lol"}'
+
+
+            ===
+            curl http://example.com
+            -X GET 
+            -H "Authorization: Bearer bear"
+
+            ===
+        "#;
+
+        let res = parse_curlman_request_file(input);
+
         assert!(res.is_ok())
     }
 }
