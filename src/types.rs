@@ -1,11 +1,21 @@
-use crate::{editor::CurlmanWidget, keys};
+use crate::{editor::CurlmanWidget, keys, App, AppState};
 use http::method::Method;
+use ratatui::layout;
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use url::Url;
 
-pub struct PaneParent {
+pub struct LayoutParent {
     pub layout_idx: u32,
     pub layout_pos_idx: usize,
+}
+
+impl LayoutParent {
+    pub fn new(layout_idx: u32, layout_pos_idx: usize) -> Self {
+        Self {
+            layout_pos_idx,
+            layout_idx,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -17,14 +27,14 @@ impl DirectionArray {
 }
 
 pub struct PaneWidget {
-    pub widget: Box<dyn CurlmanWidget>,
+    pub widget: Box<dyn CurlmanWidget<State = AppState>>,
     pub layout_idx: usize,
     pub available_directions: DirectionArray,
 }
 
 impl PaneWidget {
     pub fn new(
-        widget: Box<dyn CurlmanWidget>,
+        widget: Box<dyn CurlmanWidget<State = AppState>>,
         layout_id: usize,
         available_directions: DirectionArray,
     ) -> Self {
@@ -38,16 +48,16 @@ impl PaneWidget {
 
 // A pane has a layout and an id, meaning that ever
 pub struct Pane {
-    pub parent: Option<PaneParent>,
+    pub layout_parent: Option<LayoutParent>,
     pub layout_id: u32,
     pub widgets: Vec<PaneWidget>,
 }
 
 impl Pane {
-    pub fn new(widgets: Vec<PaneWidget>, parent: Option<PaneParent>, layout_id: u32) -> Self {
+    pub fn new(widgets: Vec<PaneWidget>, parent: Option<LayoutParent>, layout_id: u32) -> Self {
         Pane {
             widgets,
-            parent,
+            layout_parent: parent,
             layout_id,
         }
     }
@@ -57,26 +67,26 @@ impl Pane {
         current_widget_idx: usize,
         direction_to_move: keys::Direction,
     ) -> Option<usize> {
-        let Some(widget) = self.widgets.get(current_widget_idx) else {
-            return None;
-        };
-
-        let Some(new_widget_id) = widget.available_directions.0[direction_to_move as usize].clone()
-        else {
-            return None;
-        };
-
+        let widget = self.widgets.get(current_widget_idx)?;
+        let new_widget_id = widget.available_directions.0[direction_to_move as usize].clone()?;
         Some(new_widget_id.0)
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequestInfoFileMetadata {
+    pub start_index: usize,
+    pub end_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct RequestInfo {
     pub headers: HashMap<String, String>,
     pub url: Option<Url>,
     pub method: Method,
     pub timeout: Duration,
     pub body: Option<Vec<u8>>,
+    pub file_position: Option<RequestInfoFileMetadata>,
 }
 
 impl Default for RequestInfo {
@@ -87,6 +97,7 @@ impl Default for RequestInfo {
             url: None,
             timeout: Duration::from_secs(30),
             body: None,
+            file_position: None,
         }
     }
 }
@@ -105,9 +116,9 @@ impl FromStr for CurlmanRequestParamType {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "-X" => Ok(Self::Method),
-            "-H" => Ok(Self::Header),
-            "-d" | "--data" => Ok(Self::Body(BodyType::Json)),
+            "X" => Ok(Self::Method),
+            "H" => Ok(Self::Header),
+            "d" | "data" => Ok(Self::Body(BodyType::Json)),
             _ => Err(()),
         }
     }
