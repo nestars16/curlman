@@ -1,6 +1,5 @@
-use crate::{editor::CurlmanWidget, keys, App, AppState};
+use crate::{editor::CurlmanWidget, keys, AppState};
 use http::method::Method;
-use ratatui::layout;
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use url::Url;
 
@@ -18,8 +17,10 @@ impl LayoutParent {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TargetId(pub usize);
+
+#[derive(Clone, Debug)]
 pub struct DirectionArray(pub [Option<TargetId>; 4]);
 
 impl DirectionArray {
@@ -50,15 +51,22 @@ impl PaneWidget {
 pub struct Pane {
     pub layout_parent: Option<LayoutParent>,
     pub layout_id: u32,
+    pub available_directions: DirectionArray,
     pub widgets: Vec<PaneWidget>,
 }
 
 impl Pane {
-    pub fn new(widgets: Vec<PaneWidget>, parent: Option<LayoutParent>, layout_id: u32) -> Self {
+    pub fn new(
+        widgets: Vec<PaneWidget>,
+        parent: Option<LayoutParent>,
+        layout_id: u32,
+        available_directions: DirectionArray,
+    ) -> Self {
         Pane {
             widgets,
             layout_parent: parent,
             layout_id,
+            available_directions,
         }
     }
 
@@ -68,7 +76,9 @@ impl Pane {
         direction_to_move: keys::Direction,
     ) -> Option<usize> {
         let widget = self.widgets.get(current_widget_idx)?;
+
         let new_widget_id = widget.available_directions.0[direction_to_move as usize].clone()?;
+
         Some(new_widget_id.0)
     }
 }
@@ -86,7 +96,6 @@ pub struct RequestInfo {
     pub method: Method,
     pub timeout: Duration,
     pub body: Option<Vec<u8>>,
-    pub file_position: Option<RequestInfoFileMetadata>,
 }
 
 impl Default for RequestInfo {
@@ -97,7 +106,6 @@ impl Default for RequestInfo {
             url: None,
             timeout: Duration::from_secs(30),
             body: None,
-            file_position: None,
         }
     }
 }
@@ -116,9 +124,9 @@ impl FromStr for CurlmanRequestParamType {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "X" => Ok(Self::Method),
-            "H" => Ok(Self::Header),
-            "d" | "data" => Ok(Self::Body(BodyType::Json)),
+            "-X" => Ok(Self::Method),
+            "-H" => Ok(Self::Header),
+            "-d" | "--data" => Ok(Self::Body(BodyType::Json)),
             _ => Err(()),
         }
     }

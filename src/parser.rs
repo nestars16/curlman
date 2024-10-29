@@ -3,9 +3,10 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while},
     character::complete::{char, multispace0, multispace1},
+    combinator::{map, recognize},
     error::{Error, ErrorKind},
     multi::separated_list0,
-    sequence::{delimited, pair, preceded, separated_pair, tuple},
+    sequence::{delimited, pair, separated_pair},
     IResult,
 };
 
@@ -14,12 +15,23 @@ use nom::{
 //consider basic auth?
 //file uploads?
 
-use nom_locate::{position, LocatedSpan};
 use url::{self, Url};
 
-use crate::types::{BodyType, CurlmanRequestParamType, RequestInfo, RequestInfoFileMetadata};
+use crate::types::{BodyType, CurlmanRequestParamType, RequestInfo};
 
-fn parse_curl_params(input: Span) -> IResult<Span, RequestInfo> {
+#[derive(Debug)]
+pub enum Token<'a> {
+    Curl(&'a str),
+    Url(&'a str),
+    ParamKey(&'a str),
+    ParamValue(&'a str),
+    Whitespace(&'a str),
+}
+
+fn parse_curl_params<'a>(
+    input: &'a str,
+    mut tokens: Vec<Token<'a>>,
+) -> IResult<&'a str, (RequestInfo, Vec<Token<'a>>)> {
     let string_parser = alt((
         delimited(char('"'), take_till(|ch: char| ch == '"'), char('"')),
         delimited(char('\''), take_till(|ch: char| ch == '\''), char('\'')),
@@ -28,10 +40,10 @@ fn parse_curl_params(input: Span) -> IResult<Span, RequestInfo> {
     let (input, _) = multispace0(input)?;
     let tag_parser = take_while(|ch: char| ch.is_ascii_alphanumeric());
 
-    let param_parser = preceded(
+    let param_parser = recognize(pair(
         take_while(|ch: char| ch == '-'),
         take_while(|ch: char| ch.is_ascii_alphanumeric()),
-    );
+    ));
 
     let (input, params) = separated_list0(
         multispace1,
@@ -41,6 +53,8 @@ fn parse_curl_params(input: Span) -> IResult<Span, RequestInfo> {
     let mut request_info = RequestInfo::default();
     for (param_type, value) in params {
         let param_type_res: Result<CurlmanRequestParamType, _> = param_type.parse();
+        tokens.push(Token::ParamKey(param_type));
+        tokens.push(Token::ParamValue(value));
 
         let Ok(param_type) = param_type_res else {
             return Err(nom::Err::Failure(Error {
@@ -78,15 +92,22 @@ fn parse_curl_params(input: Span) -> IResult<Span, RequestInfo> {
         }
     }
 
-    Ok((input, request_info))
+    Ok((input, (request_info, tokens)))
 }
 
-pub fn parse_curlman_request(input: Span) -> IResult<Span, RequestInfo> {
-    let (input, start_index) = position(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = tag("curl")(input)?;
-    let (input, _) = multispace0(input)?;
+pub fn parse_curlman_request(input: &str) -> IResult<&str, (RequestInfo, Vec<Token>)> {
+    let mut tokens = Vec::new();
+    let (input, space) = multispace0(input)?;
+    tokens.push(Token::Whitespace(space));
+
+    let (input, curl_str) = tag("curl")(input)?;
+    tokens.push(Token::Curl(curl_str));
+
+    let (input, space) = multispace0(input)?;
+    tokens.push(Token::Whitespace(space));
+
     let (input, url_str) = take_till(char::is_whitespace)(input)?;
+    tokens.push(Token::Url(url_str));
     let url_res: Result<Url, _> = url_str.parse();
     let Ok(url) = url_res else {
         return Err(nom::Err::Failure(Error {
@@ -94,18 +115,15 @@ pub fn parse_curlman_request(input: Span) -> IResult<Span, RequestInfo> {
             code: ErrorKind::IsNot,
         }));
     };
-    let (input, _) = multispace0(input)?;
-    let (input, mut request_builder) = parse_curl_params(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, end_index) = position(input)?;
 
+    let (input, space) = multispace0(input)?;
+    tokens.push(Token::Whitespace(space));
+
+    let (input, (mut request_builder, mut tokens)) = parse_curl_params(input, tokens)?;
+    let (input, space) = multispace0(input)?;
+    tokens.push(Token::Whitespace(space));
     request_builder.url = Some(url);
-    request_builder.file_position = Some(RequestInfoFileMetadata {
-        start_index: start_index.location_offset(),
-        end_index: end_index.location_offset(),
-    });
-
-    Ok((input, request_builder))
+    Ok((input, (request_builder, tokens)))
 }
 
 struct Request {
@@ -113,10 +131,18 @@ struct Request {
     name: String,
 }
 
-type Span<'a> = LocatedSpan<&'a str>;
-pub fn parse_curlman_request_file(input: Span) -> IResult<Span, Vec<RequestInfo>> {
-    let (input, requests) = separated_list0(tag("==="), parse_curlman_request)(input)?;
-    Ok((input, requests))
+pub fn parse_curlman_request_file(input: &str) -> IResult<&str, (Vec<RequestInfo>, Vec<Token>)> {
+    let (input, requests_and_tokens) = separated_list0(tag("==="), parse_curlman_request)(input)?;
+
+    let mut requests = Vec::with_capacity(requests_and_tokens.len());
+    let mut all_tokens = Vec::with_capacity(requests_and_tokens.len());
+
+    for (request, tokens) in requests_and_tokens {
+        requests.push(request);
+        all_tokens.extend(tokens);
+    }
+
+    Ok((input, (requests, all_tokens)))
 }
 
 #[cfg(test)]
@@ -132,7 +158,8 @@ mod tests {
             --data '{"json_is" : "cool", "right" : false}'
         "#;
 
-        let res = parse_curlman_request(Span::new(input));
+        let res = parse_curlman_request(input);
+        dbg!(&res);
         assert!(res.is_ok())
     }
 
@@ -144,7 +171,6 @@ mod tests {
             -H "Authorization: Bearer ${TOKEN}"
 
             ===
-
             curl http://example.com
             -X POST 
             -H "Authorization: Bearer ${TOKEN}"
@@ -152,7 +178,7 @@ mod tests {
 
         "#;
 
-        let res = parse_curlman_request_file(Span::new(input));
-        assert!(res.is_ok_and(|r| r.1.len() == 2))
+        let res = parse_curlman_request_file(input);
+        assert!(res.is_ok_and(|r| r.1 .0.len() == 2))
     }
 }

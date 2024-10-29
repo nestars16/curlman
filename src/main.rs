@@ -11,10 +11,13 @@ use crossterm::{
     terminal::disable_raw_mode,
 };
 use editor::WidgetCommand;
-use nom_locate::LocatedSpan;
 use parser::parse_curlman_request_file;
 use ratatui::widgets::ListState;
-use ratatui::{layout::Layout, prelude::*, DefaultTerminal};
+use ratatui::{
+    layout::{Direction, Layout},
+    prelude::*,
+    DefaultTerminal,
+};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use types::{DirectionArray, LayoutParent, Pane, PaneWidget, RequestInfo, TargetId};
@@ -26,6 +29,7 @@ pub struct AppState {
 }
 
 struct App {
+    previous_widget_indexes: Option<(u32, usize)>,
     request_file: File,
     state: AppState,
     panes: HashMap<u32, Pane>,
@@ -35,12 +39,10 @@ struct App {
 }
 
 //TODO
-//Add input to request browser
-//sync state across widgets
-//json parsing and output
-//finishing vim keybinds
-//syntax highlighting (json editor)
-//correct error handling and ui
+//request result navigation
+//json filtering
+//fix vim keybinds
+//correct error handling and ui improvements
 
 pub mod keys {
     pub const UP: char = 'k';
@@ -48,6 +50,7 @@ pub mod keys {
     pub const LEFT: char = 'h';
     pub const RIGHT: char = 'l';
 
+    #[derive(Clone)]
     pub enum Direction {
         Up,
         Down,
@@ -74,7 +77,7 @@ impl App {
         default_pane_id: u32,
         default_widget_idx: usize,
         file: File,
-        selected_request_idx: Option<usize>,
+        state: AppState,
     ) -> Self {
         assert_eq!(panes.len(), layouts.len());
 
@@ -93,12 +96,9 @@ impl App {
             layouts: HashMap::from_iter(layout_map_iter),
             selected_pane_id: default_pane_id,
             selected_widget_idx: default_widget_idx,
-            state: AppState {
-                requests: Vec::new(),
-                list_state: ListState::default().with_selected(selected_request_idx),
-                selected_request_idx,
-            },
+            state,
             request_file: file,
+            previous_widget_indexes: None,
         }
     }
 
@@ -108,21 +108,35 @@ impl App {
     ) -> Result<(), crate::error::Error> {
         self.save_into_request_file(&new_text)?;
 
-        let requests = match parse_curlman_request_file(LocatedSpan::<&str>::new(&new_text)) {
-            Ok((_, vec)) => vec,
+        let requests = match parse_curlman_request_file(&new_text) {
+            Ok((_, (parsed_requests, _))) => parsed_requests,
             Err(_) => Vec::new(),
         };
-        let state = AppState {
-            list_state: self.state.list_state.clone(),
-            selected_request_idx: self.state.selected_request_idx.clone(),
-            requests,
-        };
 
-        for (_, pane) in &mut self.panes {
-            for widget in &mut pane.widgets {
-                widget.widget.update_shared_state(&state)?;
+        match self.state.selected_request_idx {
+            Some(idx) => {
+                if requests.is_empty() {
+                    self.state.selected_request_idx = None;
+                } else if idx > requests.len() - 1 {
+                    self.state.selected_request_idx = Some(0);
+                }
+                //Otherwise we can keep the same index
+            }
+            None => {
+                if requests.is_empty() {
+                    self.state.selected_request_idx = None;
+                } else {
+                    self.state.selected_request_idx = Some(0);
+                }
             }
         }
+        self.state.requests = requests;
+        for (_, pane) in &mut self.panes {
+            for widget in &mut pane.widgets {
+                widget.widget.update_shared_state(&self.state)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -133,8 +147,25 @@ impl App {
         Ok(())
     }
 
+    fn get_next_pane_id(&self, direction: keys::Direction) -> Option<u32> {
+        let pane_in_direction =
+            &self.panes[&self.selected_pane_id].available_directions.0[direction as usize];
+
+        match pane_in_direction {
+            Some(TargetId(id)) => Some(*id as u32),
+            None => None,
+        }
+    }
+
     fn run(&mut self, term: &mut DefaultTerminal) -> Result<(), crate::error::Error> {
         loop {
+            if let Some((pane_id, widget_idx)) = self.previous_widget_indexes {
+                if let Some(pane) = self.panes.get_mut(&pane_id) {
+                    pane.widgets[widget_idx].widget.toggle_selected();
+                }
+                self.previous_widget_indexes = None;
+            }
+
             term.draw(|frame| {
                 for (_, pane) in self.panes.iter() {
                     let widget_layout = if let Some(LayoutParent {
@@ -180,30 +211,67 @@ impl App {
                 .expect("Id not in widgets");
 
             let selected_pane_widget_inner = &mut selected_pane_widget.widget;
+
             if let Some(cmd) = selected_pane_widget_inner.handle_event(event) {
                 match cmd {
-                    WidgetCommand::MoveSelection { direction } => {
-                        selected_pane_widget_inner.toggle_selected();
-
-                        if let Some(new_widget_idx) =
-                            selected_pane.get_next_widget_idx(self.selected_widget_idx, direction)
+                    WidgetCommand::MoveWidgetSelection { direction } => {
+                        match selected_pane
+                            .get_next_widget_idx(self.selected_widget_idx, direction.clone())
                         {
-                            self.selected_widget_idx = new_widget_idx;
-                        }
+                            Some(new_widget_idx) => {
+                                self.previous_widget_indexes =
+                                    Some((self.selected_pane_id, self.selected_widget_idx));
 
-                        selected_pane.widgets[self.selected_widget_idx]
-                            .widget
-                            .toggle_selected();
+                                self.selected_widget_idx = new_widget_idx;
+                                selected_pane.widgets[self.selected_widget_idx]
+                                    .widget
+                                    .toggle_selected();
+                            }
+                            None => {
+                                if let Some(id) = self.get_next_pane_id(direction) {
+                                    self.previous_widget_indexes =
+                                        Some((self.selected_pane_id, self.selected_widget_idx));
+
+                                    self.selected_pane_id = id;
+                                    self.selected_widget_idx = 0;
+
+                                    if self
+                                        .previous_widget_indexes
+                                        .is_some_and(|(previous_pane_id, _)| previous_pane_id == id)
+                                    {
+                                        self.selected_widget_idx = self
+                                            .previous_widget_indexes
+                                            .expect("Guaranteed to be some")
+                                            .1;
+                                    }
+
+                                    let new_selected_pane = self
+                                        .panes
+                                        .get_mut(&self.selected_pane_id)
+                                        .expect("Id not in panes");
+
+                                    let _ = new_selected_pane
+                                        .widgets
+                                        .get_mut(self.selected_widget_idx)
+                                        .expect("Id not in widgets")
+                                        .widget
+                                        .toggle_selected();
+                                }
+                            }
+                        }
                     }
                     WidgetCommand::Save { text } => {
                         self.save_to_request_file_and_update_widgets(&text)?;
                     }
-                    WidgetCommand::MoveRequest {
-                        new_idx,
-                        old_request_buffer,
-                    } => {
-                        self.save_to_request_file_and_update_widgets(&old_request_buffer)?;
-                        self.selected_widget_idx = new_idx;
+                    WidgetCommand::MoveRequestSelection { new_idx } => {
+                        self.state.selected_request_idx = Some(new_idx);
+                        self.state.list_state.select(Some(new_idx));
+
+                        for (_, pane) in &mut self.panes {
+                            for widget in &mut pane.widgets {
+                                widget.widget.update_shared_state(&self.state)?;
+                            }
+                        }
                     }
                     WidgetCommand::Quit => {
                         return Ok(());
@@ -232,13 +300,16 @@ fn main() -> Result<(), crate::error::Error> {
     let editor_widget = Box::new(editor::Editor::new(
         buffer.clone().map(|e| e.chars().collect()),
     ));
+
     let output_widget = Box::new(curl::RequestExecutor::new());
     let mut initally_selected_request = None;
+    let mut initial_requests_vec = None;
 
     let request_browser_widget = Box::new(if let Some(buffer) = buffer {
-        match parse_curlman_request_file(LocatedSpan::<&str>::new(&buffer)) {
-            Ok((_, vec)) => {
-                let browser = editor::RequestBrowser::from(vec);
+        match parse_curlman_request_file(&buffer) {
+            Ok((_, (parsed_requests, _))) => {
+                initial_requests_vec = Some(parsed_requests.clone());
+                let browser = editor::RequestBrowser::from(parsed_requests);
                 initally_selected_request = browser.selected_request_idx;
                 browser
             }
@@ -251,43 +322,61 @@ fn main() -> Result<(), crate::error::Error> {
     let parent_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)]);
+
     let inner_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)]);
 
-    let left_side_widgets = vec![PaneWidget::new(
+    let browser_widgets = vec![PaneWidget::new(
         request_browser_widget,
         1,
         DirectionArray::NONE,
     )];
 
-    let right_side_widgets = vec![
+    let editor_widgets = vec![
         PaneWidget::new(
             editor_widget,
             0,
-            DirectionArray([None, Some(TargetId(1)), None, None]),
+            DirectionArray([None, None, None, Some(TargetId(1))]),
         ),
         PaneWidget::new(
             output_widget,
+            1,
+            DirectionArray([None, None, Some(TargetId(0)), None]),
+        ),
+    ];
+
+    let layouts = vec![parent_layout, inner_layout];
+
+    let mut panes = vec![
+        Pane::new(
+            browser_widgets,
+            Some(LayoutParent::new(0, 0)),
+            0,
+            DirectionArray([None, Some(TargetId(1)), None, None]),
+        ),
+        Pane::new(
+            editor_widgets,
+            Some(LayoutParent::new(0, 1)),
             1,
             DirectionArray([Some(TargetId(0)), None, None, None]),
         ),
     ];
 
-    let layouts = vec![parent_layout, inner_layout];
-    let panes = vec![
-        Pane::new(left_side_widgets, Some(LayoutParent::new(0, 0)), 0),
-        Pane::new(right_side_widgets, Some(LayoutParent::new(0, 1)), 1),
-    ];
+    let initial_state = AppState {
+        list_state: ListState::default().with_selected(initally_selected_request),
+        requests: initial_requests_vec.unwrap_or(Vec::new()),
+        selected_request_idx: initally_selected_request,
+    };
 
-    let mut app = App::new(
-        panes,
-        layouts,
-        1,
-        0,
-        curlman_file,
-        initally_selected_request,
-    );
+    for pane in &mut panes {
+        for widget in &mut pane.widgets {
+            widget.widget.update_shared_state(&initial_state)?;
+        }
+    }
+
+    let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state);
+
     app.run(&mut terminal)?;
     ratatui::restore();
     disable_raw_mode()?;

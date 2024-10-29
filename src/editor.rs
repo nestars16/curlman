@@ -1,7 +1,4 @@
-use crate::error::Error;
-use crate::parser::parse_curlman_request_file;
-use std::io::BufReader;
-use std::io::Read;
+use crate::{error::Error, parser::parse_curlman_request_file};
 
 //TODO?
 //Add vertical scrolling of text?
@@ -10,7 +7,6 @@ use std::io::Read;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use gapbuf::GapBuffer;
-use nom_locate::LocatedSpan;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -163,6 +159,7 @@ pub enum EditorMode {
 pub struct Editor<'editor> {
     cursor: usize, //Its always pointing to the index in which a character would be inserted
     pub text_buffer: GapBuffer<char>,
+    current_editor_str: String,
     block: Block<'editor>,
     tab_len: u8,
     current_mode: EditorMode,
@@ -186,7 +183,63 @@ impl<'editor> Editor<'editor> {
                 },
             },
             selected: true,
+            current_editor_str: String::new(),
         }
+    }
+
+    fn get_editor_text_syntax(&self, area: Rect) -> Text {
+        let EditorMode::Vim { ref state, .. } = self.current_mode;
+        let cursor_condition =
+            !matches!(state.current_state, VimState::WritingCommand) && self.selected;
+        if self.text_buffer.is_empty() && cursor_condition {
+            return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
+        }
+        let cursor_value = if self.cursor > 0 {
+            self.cursor - 1
+        } else {
+            self.cursor
+        };
+        let mut col_counter = 0;
+
+        let (_, (_, tokens)) = parse_curlman_request_file(&self.current_editor_str).unwrap();
+
+        let mut char_buf = String::new();
+        let mut spans = Vec::new();
+        let mut lines = Vec::new();
+        for token in tokens {
+            match token {
+                crate::parser::Token::Curl(text) => {
+                    spans.push(Span::raw(text).cyan());
+                }
+                crate::parser::Token::Url(text) => {
+                    spans.push(Span::raw(text).yellow());
+                }
+                crate::parser::Token::ParamKey(text) => {
+                    spans.push(Span::raw(text).green());
+                }
+                crate::parser::Token::ParamValue(text) => {
+                    spans.push(Span::raw(text).blue());
+                }
+                crate::parser::Token::Whitespace(text) => {
+                    for ch in text.chars() {
+                        if ch == '\n' {
+                            spans.push(Span::raw(std::mem::take(&mut char_buf)));
+                            lines.push(Line::from(std::mem::take(&mut spans)));
+                            continue;
+                        }
+
+                        char_buf.push(ch);
+                    }
+
+                    if !char_buf.is_empty() {
+                        spans.push(Span::raw(std::mem::take(&mut char_buf)));
+                        lines.push(Line::from(std::mem::take(&mut spans)));
+                    }
+                }
+            };
+        }
+
+        Text::from(lines)
     }
 
     fn get_editor_text(&self, area: Rect) -> Text {
@@ -455,6 +508,7 @@ impl<'editor> Editor<'editor> {
                         state.command_buff.as_str().try_into();
 
                     let Ok(command) = written_command else {
+                        state.current_state = VimState::AwaitingFirstInput;
                         break 'exec_command;
                     };
 
@@ -468,22 +522,22 @@ impl<'editor> Editor<'editor> {
                 ..
             } => match ch {
                 keys::UP => {
-                    return Some(WidgetCommand::MoveSelection {
+                    return Some(WidgetCommand::MoveWidgetSelection {
                         direction: keys::Direction::Up,
                     })
                 }
                 keys::DOWN => {
-                    return Some(WidgetCommand::MoveSelection {
+                    return Some(WidgetCommand::MoveWidgetSelection {
                         direction: keys::Direction::Down,
                     })
                 }
                 keys::LEFT => {
-                    return Some(WidgetCommand::MoveSelection {
+                    return Some(WidgetCommand::MoveWidgetSelection {
                         direction: keys::Direction::Left,
                     })
                 }
                 keys::RIGHT => {
-                    return Some(WidgetCommand::MoveSelection {
+                    return Some(WidgetCommand::MoveWidgetSelection {
                         direction: keys::Direction::Right,
                     })
                 }
@@ -800,16 +854,9 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
 }
 
 pub enum WidgetCommand {
-    MoveSelection {
-        direction: keys::Direction,
-    },
-    Save {
-        text: String,
-    },
-    MoveRequest {
-        new_idx: usize,
-        old_request_buffer: String,
-    },
+    MoveWidgetSelection { direction: keys::Direction },
+    Save { text: String },
+    MoveRequestSelection { new_idx: usize },
     Quit,
 }
 
@@ -881,6 +928,74 @@ impl<'browser> StatefulWidgetRef for RequestBrowser<'browser> {
 
 impl<'browser> InputListener for RequestBrowser<'browser> {
     fn handle_event(&mut self, e: Event) -> Option<WidgetCommand> {
+        match e {
+            Event::FocusGained => todo!(),
+            Event::FocusLost => todo!(),
+            Event::Key(key_event) => match key_event {
+                KeyEvent {
+                    code: KeyCode::Char(ch),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => match ch {
+                    keys::UP => {
+                        return Some(WidgetCommand::MoveWidgetSelection {
+                            direction: keys::Direction::Up,
+                        })
+                    }
+                    keys::DOWN => {
+                        return Some(WidgetCommand::MoveWidgetSelection {
+                            direction: keys::Direction::Down,
+                        })
+                    }
+                    keys::LEFT => {
+                        return Some(WidgetCommand::MoveWidgetSelection {
+                            direction: keys::Direction::Left,
+                        })
+                    }
+                    keys::RIGHT => {
+                        return Some(WidgetCommand::MoveWidgetSelection {
+                            direction: keys::Direction::Right,
+                        })
+                    }
+                    _ => {}
+                },
+                KeyEvent {
+                    code: KeyCode::Char(ch),
+                    ..
+                } => {
+                    let (Some(idx), Some(requests)) =
+                        (&mut self.selected_request_idx, &self.requests)
+                    else {
+                        return None;
+                    };
+
+                    if requests.is_empty() {
+                        return None;
+                    };
+
+                    match ch {
+                        keys::UP => {
+                            if *idx > 0 {
+                                *idx -= 1;
+                                return Some(WidgetCommand::MoveRequestSelection { new_idx: *idx });
+                            }
+                        }
+                        keys::DOWN => {
+                            if *idx < requests.len() {
+                                *idx += 1;
+                                return Some(WidgetCommand::MoveRequestSelection { new_idx: *idx });
+                            }
+                        }
+                        _ => {}
+                    };
+                }
+                _ => {}
+            },
+            Event::Mouse(_) => todo!(),
+            Event::Paste(_) => todo!(),
+            Event::Resize(_, _) => todo!(),
+        };
+
         None
     }
 }

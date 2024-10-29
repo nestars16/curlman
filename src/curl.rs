@@ -1,59 +1,61 @@
+use std::io::Read;
+
 use crate::{
     editor::{self, CurlmanWidget, InputListener, WidgetCommand},
     error::Error,
     keys,
-    parser::parse_curlman_request,
     types::RequestInfo,
     AppState,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use curl::easy::{Easy, List, ReadError};
-use gapbuf::GapBuffer;
 use http::Method;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Style, Stylize},
     text::Text,
-    widgets::{Block, StatefulWidgetRef, Widget, WidgetRef},
-};
-use std::{
-    io::{BufReader, Read},
-    sync::{Arc, RwLock},
+    widgets::{Block, StatefulWidgetRef, Widget},
 };
 
 pub struct RequestExecutor {
-    output_data: Vec<u8>,
     block: Block<'static>,
-    request: Option<RequestInfo>,
     selected: bool,
+    cursor_idx: usize,
+    output_data: Vec<u8>,
+    request: Option<RequestInfo>,
 }
 
 impl RequestExecutor {
     pub fn new() -> Self {
         Self {
-            output_data: Vec::new(),
             block: editor::get_round_bordered_box(),
             selected: false,
+            output_data: Vec::new(),
             request: None,
+            cursor_idx: 0,
         }
     }
 
-    pub fn perform(&mut self, req: RequestInfo) -> Result<(), Error> {
+    pub fn perform_request(&mut self) -> Result<(), Error> {
         let mut handle = Easy::new();
+
+        let Some(req) = self.request.clone() else {
+            return Err(Error::InvalidState);
+        };
+
         let Some(url) = req.url else {
             return Err(Error::InvalidUrl);
         };
-        handle.url(url.as_ref())?;
 
+        handle.url(url.as_ref())?;
         let mut header_list = List::new();
+
         for (key, value) in req.headers {
             header_list.append(&format!("{key}: {value}"))?;
         }
-
         handle.http_headers(header_list)?;
         handle.timeout(req.timeout)?;
-
         match req.method {
             Method::GET => {
                 handle.get(true)?;
@@ -96,7 +98,7 @@ impl StatefulWidgetRef for RequestExecutor {
 
     #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
     #[doc = " to implement a custom stateful widget."]
-    fn render_ref(&self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+    fn render_ref(&self, area: Rect, buf: &mut Buffer, _: &mut Self::State) {
         let text_area = self.block.inner(area);
         let inner = Text::from(String::from_utf8(self.output_data.clone()).unwrap());
         self.block.clone().render(area, buf);
@@ -116,22 +118,22 @@ impl InputListener for RequestExecutor {
                     ..
                 } => match ch {
                     keys::UP => {
-                        return Some(WidgetCommand::MoveSelection {
+                        return Some(WidgetCommand::MoveWidgetSelection {
                             direction: keys::Direction::Up,
                         })
                     }
                     keys::DOWN => {
-                        return Some(WidgetCommand::MoveSelection {
+                        return Some(WidgetCommand::MoveWidgetSelection {
                             direction: keys::Direction::Down,
                         })
                     }
                     keys::LEFT => {
-                        return Some(WidgetCommand::MoveSelection {
+                        return Some(WidgetCommand::MoveWidgetSelection {
                             direction: keys::Direction::Left,
                         })
                     }
                     keys::RIGHT => {
-                        return Some(WidgetCommand::MoveSelection {
+                        return Some(WidgetCommand::MoveWidgetSelection {
                             direction: keys::Direction::Right,
                         })
                     }
@@ -140,10 +142,20 @@ impl InputListener for RequestExecutor {
                 KeyEvent {
                     code: KeyCode::Char(ch),
                     ..
-                } => if ch == 'E' {},
+                } => {
+                    if ch == 'E' {
+                        self.output_data.clear();
+                        match self.perform_request() {
+                            Ok(_) => {}
+                            Err(e) => {
+                                self.output_data = format!("There was an error\n{:?}", e).into()
+                            }
+                        }
+                    }
+                }
                 _ => {}
             },
-            crossterm::event::Event::Mouse(mouse_event) => {}
+            crossterm::event::Event::Mouse(_) => {}
             crossterm::event::Event::Paste(_) => {}
             crossterm::event::Event::Resize(_, _) => {}
         }
@@ -165,7 +177,7 @@ impl CurlmanWidget for RequestExecutor {
 
     fn update_shared_state(&mut self, new_state: &AppState) -> Result<(), Error> {
         if let Some(idx) = new_state.selected_request_idx {
-            self.request = new_state.requests.clone().into_iter().nth(idx);
+            self.request = new_state.requests.iter().nth(idx).cloned();
         }
         Ok(())
     }
