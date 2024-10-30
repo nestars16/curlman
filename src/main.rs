@@ -13,11 +13,13 @@ use crossterm::{
 use editor::WidgetCommand;
 use parser::parse_curlman_request_file;
 use ratatui::widgets::ListState;
+
 use ratatui::{
     layout::{Direction, Layout},
     prelude::*,
     DefaultTerminal,
 };
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use types::{DirectionArray, LayoutParent, Pane, PaneWidget, RequestInfo, TargetId};
@@ -40,6 +42,7 @@ struct App {
 
 //TODO
 //request result navigation
+//vertical scrolling for editor and result navigation
 //json filtering
 //fix vim keybinds
 //correct error handling and ui improvements

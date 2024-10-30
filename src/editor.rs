@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{error::Error, parser::parse_curlman_request_file};
 
 //TODO?
@@ -159,7 +161,8 @@ pub enum EditorMode {
 pub struct Editor<'editor> {
     cursor: usize, //Its always pointing to the index in which a character would be inserted
     pub text_buffer: GapBuffer<char>,
-    current_editor_str: String,
+    buffer_string: String,
+    top_col_idx: usize,
     block: Block<'editor>,
     tab_len: u8,
     current_mode: EditorMode,
@@ -183,25 +186,21 @@ impl<'editor> Editor<'editor> {
                 },
             },
             selected: true,
-            current_editor_str: String::new(),
+            top_col_idx: 0,
+            buffer_string: String::default(),
         }
     }
 
     fn get_editor_text_syntax(&self, area: Rect) -> Text {
         let EditorMode::Vim { ref state, .. } = self.current_mode;
+
         let cursor_condition =
             !matches!(state.current_state, VimState::WritingCommand) && self.selected;
+
         if self.text_buffer.is_empty() && cursor_condition {
             return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
         }
-        let cursor_value = if self.cursor > 0 {
-            self.cursor - 1
-        } else {
-            self.cursor
-        };
-        let mut col_counter = 0;
-
-        let (_, (_, tokens)) = parse_curlman_request_file(&self.current_editor_str).unwrap();
+        let (_, (_, tokens)) = parse_curlman_request_file(&self.buffer_string).unwrap();
 
         let mut char_buf = String::new();
         let mut spans = Vec::new();
@@ -247,7 +246,7 @@ impl<'editor> Editor<'editor> {
 
         let mut char_buf = String::new();
         let mut spans = Vec::new();
-        let mut lines = Vec::new();
+        let mut lines = VecDeque::new();
 
         let cursor_condition =
             !matches!(state.current_state, VimState::WritingCommand) && self.selected;
@@ -272,7 +271,7 @@ impl<'editor> Editor<'editor> {
                     spans.push(Span::from(std::mem::take(&mut char_buf)));
                 }
 
-                lines.push(Line::from(std::mem::take(&mut spans)));
+                lines.push_back(Line::from(std::mem::take(&mut spans)));
 
                 if i == cursor_value && *ch == '\n' && cursor_condition {
                     spans.push(Span::raw(" ").add_modifier(Modifier::REVERSED));
@@ -306,10 +305,10 @@ impl<'editor> Editor<'editor> {
         }
 
         if !spans.is_empty() {
-            lines.push(Line::from(std::mem::take(&mut spans)));
+            lines.push_back(Line::from(std::mem::take(&mut spans)));
         }
 
-        Text::from(lines)
+        Text::from(Vec::from(lines))
     }
 
     fn handle_input(&mut self, event: Event) -> Option<WidgetCommand> {
@@ -828,7 +827,7 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
             height: 1,
         };
 
-        let inner_editor_content = Paragraph::new(self.get_editor_text(editor_area));
+        let inner_editor_content = Paragraph::new(self.get_editor_text_syntax(editor_area));
         inner_editor_content.render(editor_area, buf);
         let EditorMode::Vim { ref state, .. } = self.current_mode;
         const MOTION_BUFFER_RENDER_LEN: i16 = 16;
