@@ -10,6 +10,7 @@ use crossterm::{
     event::{self},
     terminal::disable_raw_mode,
 };
+
 use editor::WidgetCommand;
 use parser::parse_curlman_request_file;
 use ratatui::widgets::ListState;
@@ -53,7 +54,7 @@ pub mod keys {
     pub const LEFT: char = 'h';
     pub const RIGHT: char = 'l';
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub enum Direction {
         Up,
         Down,
@@ -112,7 +113,7 @@ impl App {
         self.save_into_request_file(&new_text)?;
 
         let requests = match parse_curlman_request_file(&new_text) {
-            Ok((_, (parsed_requests, _))) => parsed_requests,
+            Ok((_, parsed_requests)) => parsed_requests,
             Err(_) => Vec::new(),
         };
 
@@ -215,7 +216,7 @@ impl App {
 
             let selected_pane_widget_inner = &mut selected_pane_widget.widget;
 
-            if let Some(cmd) = selected_pane_widget_inner.handle_event(event) {
+            if let Some(cmd) = dbg!(selected_pane_widget_inner.handle_event(event)) {
                 match cmd {
                     WidgetCommand::MoveWidgetSelection { direction } => {
                         match selected_pane
@@ -300,17 +301,14 @@ fn main() -> Result<(), crate::error::Error> {
         Err(_) => (File::create_new("./.curlman")?, None),
     };
 
-    let editor_widget = Box::new(editor::Editor::new(
-        buffer.clone().map(|e| e.chars().collect()),
-    ));
-
+    let editor_widget = Box::new(editor::Editor::new());
     let output_widget = Box::new(curl::RequestExecutor::new());
     let mut initally_selected_request = None;
     let mut initial_requests_vec = None;
 
     let request_browser_widget = Box::new(if let Some(buffer) = buffer {
         match parse_curlman_request_file(&buffer) {
-            Ok((_, (parsed_requests, _))) => {
+            Ok((_, parsed_requests)) => {
                 initial_requests_vec = Some(parsed_requests.clone());
                 let browser = editor::RequestBrowser::from(parsed_requests);
                 initally_selected_request = browser.selected_request_idx;
@@ -379,7 +377,6 @@ fn main() -> Result<(), crate::error::Error> {
     }
 
     let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state);
-
     app.run(&mut terminal)?;
     ratatui::restore();
     disable_raw_mode()?;

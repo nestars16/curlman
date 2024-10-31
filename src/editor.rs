@@ -1,14 +1,13 @@
-use std::collections::VecDeque;
-
-use crate::{error::Error, parser::parse_curlman_request_file};
-
 //TODO?
 //Add vertical scrolling of text?
 //timeout for motions?
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use colors::{get_default_colorscheme, Colorscheme};
+use crossterm::{
+    cursor,
+    event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+};
 
-use gapbuf::GapBuffer;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -17,7 +16,31 @@ use ratatui::{
     widgets::{Block, BorderType, List, Paragraph, StatefulWidgetRef},
 };
 
-use crate::{keys, types::RequestInfo, AppState};
+use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
+
+pub mod colors {
+    use ratatui::style::Color;
+
+    pub struct Colorscheme {
+        pub curl_color: Color,
+        pub url_color: Color,
+        pub param_key_color: Color,
+        pub param_value_color: Color,
+        pub separator_color: Color,
+        pub unknown_color: Color,
+    }
+
+    pub fn get_default_colorscheme() -> Colorscheme {
+        Colorscheme {
+            curl_color: Color::Cyan,
+            url_color: Color::Yellow,
+            param_key_color: Color::Green,
+            param_value_color: Color::Blue,
+            separator_color: Color::White,
+            unknown_color: Color::White,
+        }
+    }
+}
 
 pub enum VimMode {
     Normal,
@@ -30,25 +53,28 @@ pub enum VimState {
     AwaitingOperatorOperand,
     WritingCommand,
 }
+
 #[derive(Debug)]
-pub enum VimOperator {
+pub enum CursorMovement {
     Up,
     Down,
     Left,
     Right,
     Until(char),
     Whole,
-    UntilEnd,
-    UntilStart,
+    UntilEndOfLine,
+    UntilStartOfLine,
+    UntilStartOfBuffer,
+    UntilEndOfBuffer,
 }
 
 #[derive(Debug)]
 pub enum VimMotion {
-    Move(VimOperator),
+    Move(CursorMovement),
     InsertNewLineDown,
     Append,
     Insert,
-    Delete(VimOperator),
+    Delete(CursorMovement),
 }
 
 #[derive(Debug)]
@@ -74,15 +100,15 @@ impl TryFrom<&str> for VimCommand {
     }
 }
 
-impl TryFrom<char> for VimOperator {
+impl TryFrom<char> for CursorMovement {
     type Error = ();
 
     fn try_from(value: char) -> Result<Self, Self::Error> {
         match value {
             'k' => Ok(Self::Up),
             'j' => Ok(Self::Down),
-            '$' => Ok(Self::UntilEnd),
-            '0' => Ok(Self::UntilStart),
+            '$' => Ok(Self::UntilEndOfLine),
+            '0' => Ok(Self::UntilStartOfLine),
             'h' => Ok(Self::Left),
             'l' => Ok(Self::Right),
             'd' | 'y' => Ok(Self::Whole),
@@ -93,19 +119,18 @@ impl TryFrom<char> for VimOperator {
 
 impl TryFrom<char> for VimMotion {
     type Error = ();
-
     fn try_from(value: char) -> Result<Self, Self::Error> {
         match value {
             'i' => Ok(Self::Insert),
             'a' => Ok(Self::Append),
-            'k' => Ok(Self::Move(VimOperator::Up)),
-            'j' => Ok(Self::Move(VimOperator::Down)),
-            'h' => Ok(Self::Move(VimOperator::Left)),
-            'l' => Ok(Self::Move(VimOperator::Right)),
+            'k' => Ok(Self::Move(CursorMovement::Up)),
+            'j' => Ok(Self::Move(CursorMovement::Down)),
+            'h' => Ok(Self::Move(CursorMovement::Left)),
+            'l' => Ok(Self::Move(CursorMovement::Right)),
             'o' => Ok(Self::InsertNewLineDown),
-            '0' => Ok(Self::Move(VimOperator::UntilStart)),
-            '$' => Ok(Self::Move(VimOperator::UntilEnd)),
-            'x' => Ok(Self::Delete(VimOperator::Right)),
+            '0' => Ok(Self::Move(CursorMovement::UntilStartOfLine)),
+            '$' => Ok(Self::Move(CursorMovement::UntilEndOfLine)),
+            'x' => Ok(Self::Delete(CursorMovement::Right)),
             _ => Err(()),
         }
     }
@@ -113,13 +138,12 @@ impl TryFrom<char> for VimMotion {
 
 impl TryFrom<[char; 3]> for VimMotion {
     type Error = ();
-
     fn try_from(value: [char; 3]) -> Result<Self, Self::Error> {
         match value {
-            ['f', second, ' '] => Ok(Self::Move(VimOperator::Until(second))),
-            ['d', 'd', ' '] => Ok(Self::Delete(VimOperator::Whole)),
+            ['f', second, ' '] => Ok(Self::Move(CursorMovement::Until(second))),
+            ['d', 'd', ' '] => Ok(Self::Delete(CursorMovement::Whole)),
             ['d', 'f', ' '] => Err(()),
-            ['d', 'f', third] => Ok(Self::Delete(VimOperator::Until(third))),
+            ['d', 'f', third] => Ok(Self::Delete(CursorMovement::Until(third))),
             ['y', 'f', ' '] => Err(()),
             _ => Err(()),
         }
@@ -159,10 +183,10 @@ pub enum EditorMode {
 }
 
 pub struct Editor<'editor> {
-    cursor: usize, //Its always pointing to the index in which a character would be inserted
-    pub text_buffer: GapBuffer<char>,
-    buffer_string: String,
-    top_col_idx: usize,
+    col: usize,
+    row: usize,
+    pub lines: Vec<String>,
+    colorscheme: Colorscheme,
     block: Block<'editor>,
     tab_len: u8,
     current_mode: EditorMode,
@@ -170,10 +194,8 @@ pub struct Editor<'editor> {
 }
 
 impl<'editor> Editor<'editor> {
-    pub fn new(text_buffer: Option<GapBuffer<char>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            cursor: 0,
-            text_buffer: text_buffer.unwrap_or(GapBuffer::new()),
             block: Block::bordered().border_style(Style::new().red()),
             tab_len: 4,
             current_mode: EditorMode::Vim {
@@ -186,129 +208,82 @@ impl<'editor> Editor<'editor> {
                 },
             },
             selected: true,
-            top_col_idx: 0,
-            buffer_string: String::default(),
+            col: 0,
+            row: 0,
+            lines: vec![String::from("")],
+            colorscheme: get_default_colorscheme(),
         }
-    }
-
-    fn get_editor_text_syntax(&self, area: Rect) -> Text {
-        let EditorMode::Vim { ref state, .. } = self.current_mode;
-
-        let cursor_condition =
-            !matches!(state.current_state, VimState::WritingCommand) && self.selected;
-
-        if self.text_buffer.is_empty() && cursor_condition {
-            return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
-        }
-        let (_, (_, tokens)) = parse_curlman_request_file(&self.buffer_string).unwrap();
-
-        let mut char_buf = String::new();
-        let mut spans = Vec::new();
-        let mut lines = Vec::new();
-        for token in tokens {
-            match token {
-                crate::parser::Token::Curl(text) => {
-                    spans.push(Span::raw(text).cyan());
-                }
-                crate::parser::Token::Url(text) => {
-                    spans.push(Span::raw(text).yellow());
-                }
-                crate::parser::Token::ParamKey(text) => {
-                    spans.push(Span::raw(text).green());
-                }
-                crate::parser::Token::ParamValue(text) => {
-                    spans.push(Span::raw(text).blue());
-                }
-                crate::parser::Token::Whitespace(text) => {
-                    for ch in text.chars() {
-                        if ch == '\n' {
-                            spans.push(Span::raw(std::mem::take(&mut char_buf)));
-                            lines.push(Line::from(std::mem::take(&mut spans)));
-                            continue;
-                        }
-
-                        char_buf.push(ch);
-                    }
-
-                    if !char_buf.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut char_buf)));
-                        lines.push(Line::from(std::mem::take(&mut spans)));
-                    }
-                }
-            };
-        }
-
-        Text::from(lines)
     }
 
     fn get_editor_text(&self, area: Rect) -> Text {
-        let EditorMode::Vim { ref state, .. } = self.current_mode;
+        let (_, tokenized_lines) = parse_curlman_editor(&self.lines, &self.colorscheme).unwrap();
 
-        let mut char_buf = String::new();
         let mut spans = Vec::new();
-        let mut lines = VecDeque::new();
+        let mut lines = Vec::new();
 
-        let cursor_condition =
-            !matches!(state.current_state, VimState::WritingCommand) && self.selected;
+        let mut is_cursor_set = false;
 
-        if self.text_buffer.is_empty() && cursor_condition {
-            return Text::styled(" ", Style::default().add_modifier(Modifier::REVERSED));
-        }
+        for (row_idx, line) in tokenized_lines.into_iter().enumerate() {
+            let mut current_col = 0;
+            for line_token in line {
+                let line_token_len = line_token.get_str().len();
+                let line_token_end = (current_col + line_token_len).checked_sub(1).unwrap_or(0);
 
-        let cursor_value = if self.cursor > 0 {
-            self.cursor - 1
-        } else {
-            self.cursor
-        };
+                let cursor_has_to_be_set =
+                    !is_cursor_set && row_idx == self.row && line_token_end >= self.col;
 
-        let mut col_counter = 0;
+                match line_token {
+                    crate::parser::Token::Curl(text, color)
+                    | crate::parser::Token::Url(text, color)
+                    | crate::parser::Token::ParamKey(text, color)
+                    | crate::parser::Token::ParamValue(text, color)
+                    | crate::parser::Token::Unknown(text, color)
+                    | crate::parser::Token::Separator(text, color) => 'token_block: {
+                        if !cursor_has_to_be_set {
+                            spans.push(Span::raw(text).fg(color));
+                            break 'token_block;
+                        }
+                        is_cursor_set = true;
+                        let split_val = self.col - current_col;
+                        let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
+                        spans.push(Span::raw(before_cursor).fg(color));
+                        let (cursor_char, rest_of_span) =
+                            (&at_and_before_cursor[0..1], &at_and_before_cursor[1..]);
+                        spans.push(Span::raw(cursor_char).fg(color).reversed());
+                        spans.push(Span::raw(rest_of_span).fg(color));
+                    }
+                    crate::parser::Token::Whitespace(text) => 'whitespace_block: {
+                        if !cursor_has_to_be_set {
+                            spans.push(Span::raw(text));
+                            break 'whitespace_block;
+                        }
 
-        for (i, ch) in self.text_buffer.iter().enumerate() {
-            if *ch == '\n' || col_counter > area.width {
-                col_counter = 0;
+                        is_cursor_set = true;
 
-                if !char_buf.is_empty() {
-                    spans.push(Span::from(std::mem::take(&mut char_buf)));
-                }
+                        let split_val = self.col - current_col;
+                        let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
 
-                lines.push_back(Line::from(std::mem::take(&mut spans)));
+                        spans.push(Span::raw(before_cursor));
 
-                if i == cursor_value && *ch == '\n' && cursor_condition {
-                    spans.push(Span::raw(" ").add_modifier(Modifier::REVERSED));
-                }
+                        let (cursor_char, rest_of_span) =
+                            (&at_and_before_cursor[0..1], &at_and_before_cursor[1..]);
+
+                        spans.push(Span::raw(cursor_char).reversed());
+                        spans.push(Span::raw(rest_of_span));
+                    }
+                };
+
+                current_col += line_token_len;
             }
 
-            if i == cursor_value && cursor_condition {
-                col_counter += 1;
-                spans.push(Span::from(std::mem::take(&mut char_buf)));
-
-                spans.push(Span::styled(
-                    String::from(*ch),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                ));
-                continue;
+            if row_idx == self.row && self.col == self.lines[self.row].len() {
+                spans.push(Span::raw(" ").reversed());
             }
 
-            if *ch == ' ' {
-                col_counter += 1;
-                char_buf.push(*ch);
-                spans.push(Span::from(std::mem::take(&mut char_buf)));
-                continue;
-            }
-
-            col_counter += 1;
-            char_buf.push(*ch);
+            lines.push(Line::from(std::mem::take(&mut spans)));
         }
 
-        if !char_buf.is_empty() {
-            spans.push(Span::from(std::mem::take(&mut char_buf)));
-        }
-
-        if !spans.is_empty() {
-            lines.push_back(Line::from(std::mem::take(&mut spans)));
-        }
-
-        Text::from(Vec::from(lines))
+        Text::from(lines)
     }
 
     fn handle_input(&mut self, event: Event) -> Option<WidgetCommand> {
@@ -316,14 +291,15 @@ impl<'editor> Editor<'editor> {
             Event::Key(key_event) => match self.current_mode {
                 EditorMode::Vim { ref mode, .. } => match mode {
                     VimMode::Normal => return self.handle_vim_motions(key_event),
-                    VimMode::Insert => self.handle_key_events(key_event),
+                    VimMode::Insert => {
+                        self.handle_key_events(key_event);
+                    }
                 },
             },
-            Event::Paste(e) => {
-                self.text_buffer.insert_many(self.cursor, e.chars());
-            }
+            Event::Paste(e) => self.lines[self.row].insert_str(self.col, &e),
             _ => {}
         };
+
         None
     }
 
@@ -333,7 +309,9 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Char(ch),
                 kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 ..
-            } => self.insert_char(ch),
+            } => {
+                self.insert_char(ch);
+            }
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
@@ -349,33 +327,31 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Up,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_up(),
+            } => self.move_cursor(CursorMovement::Up),
             KeyEvent {
                 code: KeyCode::Down,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_down(),
+            } => self.move_cursor(CursorMovement::Down),
             KeyEvent {
                 code: KeyCode::Left,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_left(),
+            } => self.move_cursor(CursorMovement::Left),
             KeyEvent {
                 code: KeyCode::Right,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_right(),
+            } => self.move_cursor(CursorMovement::Right),
             KeyEvent {
                 code: KeyCode::Esc,
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
                 let EditorMode::Vim { mode, .. } = &mut self.current_mode;
-
                 if !matches!(mode, VimMode::Insert) {
                     return;
                 }
-
                 self.switch_to_normal_mode()
             }
             _ => {}
@@ -386,7 +362,7 @@ impl<'editor> Editor<'editor> {
         match command {
             VimCommand::Save => {
                 return Some(WidgetCommand::Save {
-                    text: self.text_buffer.clone().into_iter().collect::<String>(),
+                    text: String::new(),
                 });
             }
             VimCommand::Quit => {
@@ -397,74 +373,28 @@ impl<'editor> Editor<'editor> {
 
     fn handle_motions(&mut self, motion: VimMotion) {
         match motion {
-            VimMotion::Move(VimOperator::Up) => self.move_up(),
-            VimMotion::Move(VimOperator::Down) => self.move_down(),
-            VimMotion::Move(VimOperator::Left) => self.move_left(),
-            VimMotion::Move(VimOperator::Right) => self.move_right(),
-            VimMotion::Move(VimOperator::UntilEnd) => {
-                self.cursor = self.get_line_end();
-            }
-            VimMotion::Move(VimOperator::UntilStart) => {
-                self.cursor = self.get_line_start();
-            }
+            VimMotion::Move(operator) => self.move_cursor(operator),
             VimMotion::Append => {
                 self.switch_to_insert_mode();
             }
             VimMotion::Insert => {
                 self.switch_to_insert_mode();
-                if self.cursor > 0 {
-                    self.cursor -= 1
-                }
             }
             VimMotion::Delete(vim_operator) => match vim_operator {
-                VimOperator::Up => {}
-                VimOperator::Down => {}
-                VimOperator::Left => {
-                    if self.cursor > 2 {
-                        self.text_buffer.remove(self.cursor - 2);
-                        self.cursor -= 1;
-                    }
-                }
-                VimOperator::Right => {
+                CursorMovement::Up => {}
+                CursorMovement::Down => {}
+                CursorMovement::Left => {}
+                CursorMovement::Right => {
                     self.backspace_delete();
                 }
-                VimOperator::Until(char) => {
-                    let mut stop: Option<usize> = None;
-
-                    let line_end_idx = self.get_line_end();
-
-                    for i in self.cursor..=line_end_idx {
-                        if self.text_buffer.get(i).is_some_and(|ch| *ch == char) {
-                            stop = Some(i);
-                            break;
-                        }
-                    }
-
-                    if let Some(stop) = stop {
-                        self.text_buffer.drain((self.cursor - 1)..=stop);
-                    }
-                }
-                VimOperator::Whole => {}
-                VimOperator::UntilEnd => {
-                    self.text_buffer.drain(self.cursor..self.get_line_end());
-
-                    if self.cursor > self.text_buffer.len() {
-                        self.cursor = self.text_buffer.len()
-                    }
-                }
-                VimOperator::UntilStart => {
-                    self.text_buffer
-                        .drain(self.get_line_start() + 1..self.cursor);
-
-                    if self.cursor > self.text_buffer.len() {
-                        self.cursor = self.text_buffer.len()
-                    }
-                }
+                CursorMovement::Until(char) => {}
+                CursorMovement::Whole => {}
+                CursorMovement::UntilEndOfLine => {}
+                CursorMovement::UntilStartOfLine => {}
+                CursorMovement::UntilStartOfBuffer => {}
+                CursorMovement::UntilEndOfBuffer => {}
             },
-            VimMotion::InsertNewLineDown => {
-                self.cursor = self.text_buffer.len();
-                self.insert_char('\n');
-            }
+            VimMotion::InsertNewLineDown => {}
             _ => {}
         }
     }
@@ -615,189 +545,112 @@ impl<'editor> Editor<'editor> {
 
     fn switch_to_insert_mode(&mut self) {
         let EditorMode::Vim { mode, state } = &mut self.current_mode;
-
         *mode = VimMode::Insert;
         *state = VimEditorState::default();
     }
 
     fn insert_char(&mut self, ch: char) {
-        self.text_buffer.insert(self.cursor, ch);
-        self.cursor += 1;
+        let line = &mut self.lines[self.row];
+
+        let insert_idx = line
+            .char_indices()
+            .nth(self.col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+
+        line.insert(insert_idx, ch);
+        self.col += 1;
     }
 
     fn insert_newline(&mut self) {
-        self.text_buffer.insert(self.cursor, '\n');
-        self.cursor += 1;
+        let line = &mut self.lines[self.row];
+        let offset = line
+            .char_indices()
+            .nth(self.col)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+
+        let next_line = line[offset..].to_string();
+        line.truncate(offset);
+
+        self.lines.insert(self.row + 1, next_line);
+        self.row += 1;
+        self.col = 0;
     }
 
-    fn insert_tab(&mut self) {
-        self.text_buffer
-            .insert_many(self.cursor, (0..self.tab_len).map(|_| ' '));
+    fn insert_tab(&mut self) {}
 
-        self.cursor += self.tab_len as usize;
+    fn delete_newline(&mut self) {
+        if self.row == 0 {
+            return;
+        }
+
+        let line = self.lines.remove(self.row);
+        let prev_line = &mut self.lines[self.row - 1];
+
+        self.row -= 1;
+        self.col = prev_line.chars().count();
+        prev_line.push_str(&line);
     }
 
-    fn get_line_end(&self) -> usize {
-        let mut line_end_idx = None;
-        let buffer_len = self.text_buffer.len();
+    fn move_cursor(&mut self, operator: CursorMovement) {
+        if let Some((new_row, new_col)) = self.get_next_cursor_position(operator) {
+            self.col = new_col;
+            self.row = new_row;
+        }
+    }
 
-        for i in self.cursor..buffer_len {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
-                line_end_idx = Some(i);
-                break;
+    fn get_next_cursor_position(&self, operator: CursorMovement) -> Option<(usize, usize)> {
+        fn fit_col(col: usize, line: &str) -> usize {
+            std::cmp::min(col, line.chars().count())
+        }
+
+        match operator {
+            CursorMovement::Right if self.col >= self.lines[self.row].chars().count() => {
+                (self.row + 1 < self.lines.len()).then(|| (self.row + 1, 0))
             }
-        }
-
-        line_end_idx.unwrap_or(buffer_len)
-    }
-
-    fn get_line_start(&self) -> usize {
-        let mut line_start_idx = 0;
-        for i in (0..self.cursor).rev() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
-                line_start_idx = i as i32;
-                break;
+            CursorMovement::Right => Some((self.row, self.col + 1)),
+            CursorMovement::Left if self.col == 0 => {
+                let row = self.row.checked_sub(1)?;
+                Some((row, self.lines[row].chars().count()))
             }
-        }
-
-        line_start_idx as usize
-    }
-
-    fn move_up(&mut self) {
-        let line_start = self.get_line_start();
-
-        if line_start == 0 {
-            return;
-        }
-
-        // Find the start of the previous line
-        let mut prev_line_start = None;
-
-        for i in (0..line_start).rev() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
-                prev_line_start = Some(i);
-                break;
+            CursorMovement::Left => Some((self.row, self.col - 1)),
+            CursorMovement::Up => {
+                let row = self.row.checked_sub(1)?;
+                Some((row, fit_col(self.col, &self.lines[row])))
             }
-        }
-
-        let curr_offset = self.cursor - line_start;
-
-        let Some(prev_line_start) = prev_line_start else {
-            self.cursor = if curr_offset < line_start {
-                curr_offset - 1
-            } else {
-                line_start
-            };
-
-            return;
-        };
-
-        //The idea here is similar to our move down after finding our line_start
-        //and our previous_line_start, since we know our offset
-        //is self.cursor - line_start all we have to do is
-        //set our self.cursor to previous_line_start + offset
-        //if the line is equal or larger to the offset, otherwise
-        // we set it to previous_line_start + 1
-        let target = prev_line_start + curr_offset;
-
-        self.cursor = if target >= line_start {
-            line_start
-        } else {
-            target
-        }
-    }
-
-    fn move_down(&mut self) {
-        let mut line_end: Option<usize> = None;
-        let mut next_line_end: Option<usize> = None;
-        let mut newline_count = 0;
-
-        for i in self.cursor..self.text_buffer.len() {
-            if self.text_buffer.get(i).is_some_and(|ch| *ch == '\n') {
-                match newline_count {
-                    0 => {
-                        line_end = Some(i);
-                        newline_count += 1;
-                    }
-                    1 => next_line_end = Some(i),
-                    _ => {
-                        unreachable!()
-                    }
-                }
+            CursorMovement::Down => Some((
+                self.row + 1,
+                fit_col(self.col, self.lines.get(self.row + 1)?),
+            )),
+            CursorMovement::UntilStartOfLine => Some((self.row, 0)),
+            CursorMovement::UntilEndOfLine => {
+                Some((self.row, self.lines[self.row].chars().count()))
             }
+            CursorMovement::UntilStartOfBuffer => Some((0, fit_col(self.col, &self.lines[0]))),
+            CursorMovement::UntilEndOfBuffer => {
+                let row = self.lines.len() - 1;
+                Some((row, fit_col(self.col, &self.lines[row])))
+            }
+            CursorMovement::Until(_) => None,
+            CursorMovement::Whole => None,
         }
-
-        //This means that we found newline from
-        //our cursor onwards, meaning nowhere to go
-        let Some(line_end) = line_end else {
-            return;
-        };
-
-        let line_start = self.get_line_start();
-        let curr_offset = self.cursor - line_start;
-        let target = line_end + curr_offset;
-
-        //Here we check if needs to bounds check, if there is no
-        //next line after our line end then we can just
-        //check our current line offset and see if it fits in the next line
-        //if it doesn't then we just set it at the end of the line
-        let Some(next_line_end) = next_line_end else {
-            self.cursor = if target < self.text_buffer.len() {
-                if line_start == 0 {
-                    target + 1
-                } else {
-                    target
-                }
-            } else {
-                self.text_buffer.len()
-            };
-            return;
-        };
-
-        self.cursor = if target > next_line_end {
-            next_line_end
-        } else {
-            target + if line_start == 0 { 1 } else { 0 }
-        }
-    }
-
-    fn move_right(&mut self) {
-        if self.cursor >= self.text_buffer.len()
-            || self
-                .text_buffer
-                .get(self.cursor)
-                .is_some_and(|ch| *ch == '\n')
-        {
-            return;
-        };
-
-        self.cursor += 1
-    }
-
-    fn move_left(&mut self) {
-        if self.cursor <= 1
-            || self
-                .text_buffer
-                .get(self.cursor - 1)
-                .is_some_and(|ch| *ch == '\n')
-        {
-            return;
-        }
-
-        self.cursor -= 1;
     }
 
     fn backspace_delete(&mut self) {
-        if self.cursor < 1 {
-            if !self.text_buffer.is_empty() {
-                self.text_buffer.remove(0);
-            }
-            return;
+        if self.col == 0 {
+            return self.delete_newline();
         }
 
-        self.text_buffer.remove(self.cursor - 1);
-        self.cursor -= 1;
+        let line = &mut self.lines[self.row];
+
+        if let Some((offset, _)) = line.char_indices().nth(self.col - 1) {
+            line.remove(offset);
+            self.col -= 1;
+        }
     }
+
+    fn forward_delete(&mut self) {}
 }
 
 impl<'editor> StatefulWidgetRef for Editor<'editor> {
@@ -827,7 +680,7 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
             height: 1,
         };
 
-        let inner_editor_content = Paragraph::new(self.get_editor_text_syntax(editor_area));
+        let inner_editor_content = Paragraph::new(self.get_editor_text(editor_area));
         inner_editor_content.render(editor_area, buf);
         let EditorMode::Vim { ref state, .. } = self.current_mode;
         const MOTION_BUFFER_RENDER_LEN: i16 = 16;
@@ -852,6 +705,7 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
     }
 }
 
+#[derive(Debug)]
 pub enum WidgetCommand {
     MoveWidgetSelection { direction: keys::Direction },
     Save { text: String },
