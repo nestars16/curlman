@@ -280,7 +280,7 @@ fn parse_curlman_editor_line<'a, 'b>(
 pub fn parse_curlman_editor<'a>(
     input: &'a Vec<String>,
     colorscheme: &'a Colorscheme,
-) -> IResult<(), Vec<Vec<Token<'a>>>> {
+) -> Vec<Vec<Token<'a>>> {
     let mut editor_tokens = Vec::new();
     let mut line_tokens = Vec::new();
     let mut parser_state = ParserState::ExpectingCurl;
@@ -302,7 +302,7 @@ pub fn parse_curlman_editor<'a>(
         editor_tokens.push(std::mem::take(&mut line_tokens));
     }
 
-    Ok(((), editor_tokens))
+    editor_tokens
 }
 
 #[cfg(test)]
@@ -334,7 +334,7 @@ mod tests {
         ];
         let colorscheme = get_default_colorscheme();
         let res = parse_curlman_editor(&input, &colorscheme);
-        assert!(res.is_ok());
+        assert!(!res.is_empty());
     }
 
     #[test]

@@ -216,7 +216,7 @@ impl App {
 
             let selected_pane_widget_inner = &mut selected_pane_widget.widget;
 
-            if let Some(cmd) = dbg!(selected_pane_widget_inner.handle_event(event)) {
+            if let Some(cmd) = selected_pane_widget_inner.handle_event(event) {
                 match cmd {
                     WidgetCommand::MoveWidgetSelection { direction } => {
                         match selected_pane

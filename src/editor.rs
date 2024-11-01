@@ -2,10 +2,12 @@
 //Add vertical scrolling of text?
 //timeout for motions?
 
+use std::sync::atomic::AtomicU16;
+
 use colors::{get_default_colorscheme, Colorscheme};
 use crossterm::{
-    cursor,
     event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    terminal::window_size,
 };
 
 use ratatui::{
@@ -185,6 +187,8 @@ pub enum EditorMode {
 pub struct Editor<'editor> {
     col: usize,
     row: usize,
+    top_row: u16,
+    editor_height: AtomicU16,
     pub lines: Vec<String>,
     colorscheme: Colorscheme,
     block: Block<'editor>,
@@ -212,18 +216,124 @@ impl<'editor> Editor<'editor> {
             row: 0,
             lines: vec![String::from("")],
             colorscheme: get_default_colorscheme(),
+            top_row: 0,
+            editor_height: AtomicU16::new(0),
+        }
+    }
+
+    fn process_token(
+        &self,
+        text: &'editor str,
+        color: Color,
+        area: &Rect,
+        cursor_has_to_be_set: bool,
+        is_cursor_set: &mut bool,
+        current_col: &mut usize,
+        lines: &mut Vec<Line<'editor>>,
+        spans: &mut Vec<Span<'editor>>,
+    ) {
+        let will_overflow = *current_col + text.len() > area.width as usize;
+        match (cursor_has_to_be_set, will_overflow) {
+            (false, false) => {
+                spans.push(Span::raw(text).fg(color));
+            }
+            (true, false) => {
+                *is_cursor_set = true;
+                let split_val = self.col - *current_col;
+                let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
+                spans.push(Span::raw(before_cursor).fg(color));
+                let (cursor_char, rest_of_span) =
+                    (&at_and_before_cursor[..1], &at_and_before_cursor[1..]);
+                spans.push(Span::raw(cursor_char).fg(color).reversed());
+                spans.push(Span::raw(rest_of_span).fg(color));
+            }
+            (false, true) => {
+                let remaining_space_in_line = area.width as usize - *current_col;
+                let (start, mut end) = text.split_at(remaining_space_in_line);
+                spans.push(Span::raw(start).fg(color));
+                lines.push(Line::from(std::mem::take(spans)));
+                while end.len() > area.width as usize {
+                    spans.push(Span::raw(&end[..area.width as usize]).fg(color));
+                    lines.push(Line::from(std::mem::take(spans)));
+                    end = &end[area.width as usize..];
+                }
+                spans.push(Span::raw(end).fg(color));
+                *current_col = end.len().checked_sub(1).unwrap_or(0);
+            }
+            (true, true) => {
+                *is_cursor_set = true;
+                let mut remaining_space_in_line = area.width as usize - *current_col;
+                let line_cursor_idx = self.col - *current_col;
+
+                let (before_cursor, containing_and_after_cursor) = text.split_at(line_cursor_idx);
+
+                match before_cursor.len() < remaining_space_in_line {
+                    true => {
+                        spans.push(Span::raw(before_cursor).fg(color));
+                        remaining_space_in_line -= before_cursor.len();
+                    }
+                    false => {
+                        spans.push(Span::raw(&before_cursor[..remaining_space_in_line]).fg(color));
+                        lines.push(Line::from(std::mem::take(spans)));
+                        let mut remaining_before_cursor_text =
+                            &before_cursor[remaining_space_in_line..];
+
+                        while remaining_before_cursor_text.len() > area.width as usize {
+                            spans.push(
+                                Span::raw(&remaining_before_cursor_text[..area.width as usize])
+                                    .fg(color),
+                            );
+                            lines.push(Line::from(std::mem::take(spans)));
+                            remaining_before_cursor_text =
+                                &remaining_before_cursor_text[area.width as usize..];
+                        }
+
+                        spans.push(Span::raw(remaining_before_cursor_text).fg(color));
+                    }
+                }
+
+                match containing_and_after_cursor.len() {
+                    0 => {}
+                    1 => {
+                        spans.push(Span::raw(containing_and_after_cursor).fg(color).reversed());
+                    }
+                    _ => {
+                        let cursor_char = &containing_and_after_cursor[..1];
+                        assert!(cursor_char.len() == 1);
+                        spans.push(Span::raw(cursor_char).fg(color).reversed());
+                        let mut after_cursor = &containing_and_after_cursor[1..];
+
+                        while after_cursor.len() > remaining_space_in_line {
+                            spans.push(
+                                Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
+                            );
+                            lines.push(Line::from(std::mem::take(spans)));
+                            after_cursor = &after_cursor[remaining_space_in_line - 1..];
+                            remaining_space_in_line = area.width as usize;
+                        }
+
+                        spans.push(Span::raw(after_cursor).fg(color));
+                        *current_col = after_cursor.len();
+                    }
+                }
+            }
         }
     }
 
     fn get_editor_text(&self, area: Rect) -> Text {
-        let (_, tokenized_lines) = parse_curlman_editor(&self.lines, &self.colorscheme).unwrap();
+        let tokenized_lines = parse_curlman_editor(&self.lines, &self.colorscheme);
 
         let mut spans = Vec::new();
         let mut lines = Vec::new();
-
         let mut is_cursor_set = false;
 
         for (row_idx, line) in tokenized_lines.into_iter().enumerate() {
+            if row_idx < self.top_row as usize
+                || row_idx >= self.top_row as usize + area.height as usize
+            {
+                continue;
+            }
+
             let mut current_col = 0;
             for line_token in line {
                 let line_token_len = line_token.get_str().len();
@@ -238,39 +348,26 @@ impl<'editor> Editor<'editor> {
                     | crate::parser::Token::ParamKey(text, color)
                     | crate::parser::Token::ParamValue(text, color)
                     | crate::parser::Token::Unknown(text, color)
-                    | crate::parser::Token::Separator(text, color) => 'token_block: {
-                        if !cursor_has_to_be_set {
-                            spans.push(Span::raw(text).fg(color));
-                            break 'token_block;
-                        }
-                        is_cursor_set = true;
-                        let split_val = self.col - current_col;
-                        let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
-                        spans.push(Span::raw(before_cursor).fg(color));
-                        let (cursor_char, rest_of_span) =
-                            (&at_and_before_cursor[0..1], &at_and_before_cursor[1..]);
-                        spans.push(Span::raw(cursor_char).fg(color).reversed());
-                        spans.push(Span::raw(rest_of_span).fg(color));
-                    }
-                    crate::parser::Token::Whitespace(text) => 'whitespace_block: {
-                        if !cursor_has_to_be_set {
-                            spans.push(Span::raw(text));
-                            break 'whitespace_block;
-                        }
-
-                        is_cursor_set = true;
-
-                        let split_val = self.col - current_col;
-                        let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
-
-                        spans.push(Span::raw(before_cursor));
-
-                        let (cursor_char, rest_of_span) =
-                            (&at_and_before_cursor[0..1], &at_and_before_cursor[1..]);
-
-                        spans.push(Span::raw(cursor_char).reversed());
-                        spans.push(Span::raw(rest_of_span));
-                    }
+                    | crate::parser::Token::Separator(text, color) => self.process_token(
+                        text,
+                        color,
+                        &area,
+                        cursor_has_to_be_set,
+                        &mut is_cursor_set,
+                        &mut current_col,
+                        &mut lines,
+                        &mut spans,
+                    ),
+                    crate::parser::Token::Whitespace(text) => self.process_token(
+                        text,
+                        Color::White,
+                        &area,
+                        cursor_has_to_be_set,
+                        &mut is_cursor_set,
+                        &mut current_col,
+                        &mut lines,
+                        &mut spans,
+                    ),
                 };
 
                 current_col += line_token_len;
@@ -576,6 +673,7 @@ impl<'editor> Editor<'editor> {
         self.lines.insert(self.row + 1, next_line);
         self.row += 1;
         self.col = 0;
+        self.adjust_viewport();
     }
 
     fn insert_tab(&mut self) {}
@@ -591,12 +689,28 @@ impl<'editor> Editor<'editor> {
         self.row -= 1;
         self.col = prev_line.chars().count();
         prev_line.push_str(&line);
+        self.adjust_viewport()
+    }
+
+    fn adjust_viewport(&mut self) {
+        let editor_height_val = self
+            .editor_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let row_pos_in_viewport = self.top_row as i32 + editor_height_val as i32 - self.row as i32;
+
+        if row_pos_in_viewport <= 0 {
+            self.top_row += 1;
+        } else if row_pos_in_viewport >= editor_height_val as i32 {
+            self.top_row = self.row as u16;
+        }
     }
 
     fn move_cursor(&mut self, operator: CursorMovement) {
         if let Some((new_row, new_col)) = self.get_next_cursor_position(operator) {
             self.col = new_col;
             self.row = new_row;
+            self.adjust_viewport()
         }
     }
 
@@ -673,6 +787,10 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
             width: text_area.width,
             height: editor_area_height,
         };
+
+        self.editor_height
+            .store(editor_area.height, std::sync::atomic::Ordering::Relaxed);
+
         let command_bar_area = Rect {
             x: text_area.x,
             y: text_area.y + editor_area_height, // Position immediately below the editor area
@@ -681,6 +799,7 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         };
 
         let inner_editor_content = Paragraph::new(self.get_editor_text(editor_area));
+
         inner_editor_content.render(editor_area, buf);
         let EditorMode::Vim { ref state, .. } = self.current_mode;
         const MOTION_BUFFER_RENDER_LEN: i16 = 16;
