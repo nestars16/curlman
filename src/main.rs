@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use types::{DirectionArray, LayoutParent, Pane, PaneWidget, RequestInfo, TargetId};
 
+#[derive(Debug)]
 pub struct AppState {
     pub list_state: ListState,
     pub requests: Vec<RequestInfo>,
@@ -124,7 +125,6 @@ impl App {
                 } else if idx > requests.len() - 1 {
                     self.state.selected_request_idx = Some(0);
                 }
-                //Otherwise we can keep the same index
             }
             None => {
                 if requests.is_empty() {
@@ -134,13 +134,17 @@ impl App {
                 }
             }
         }
+
         self.state.requests = requests;
+        self.state
+            .list_state
+            .select(self.state.selected_request_idx);
+
         for (_, pane) in &mut self.panes {
             for widget in &mut pane.widgets {
                 widget.widget.update_shared_state(&self.state)?;
             }
         }
-
         Ok(())
     }
 
@@ -291,17 +295,31 @@ fn main() -> Result<(), crate::error::Error> {
     terminal.clear()?;
     enable_raw_mode()?;
     let mut raw_buffer = String::new();
-
     let (curlman_file, buffer) = match OpenOptions::new().read(true).write(true).open("./.curlman")
     {
         Ok(mut file) => {
             file.read_to_string(&mut raw_buffer)?;
+
             (file, Some(raw_buffer))
         }
         Err(_) => (File::create_new("./.curlman")?, None),
     };
 
-    let editor_widget = Box::new(editor::Editor::new());
+    let editor_start_state = match &buffer {
+        Some(curlman_file_str) => {
+            let lines = curlman_file_str
+                .split('\n')
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            Some(lines)
+        }
+        None => None,
+    };
+
+    let editor_widget = Box::new(editor::Editor::new(
+        editor_start_state.unwrap_or(vec!["".to_string()]),
+    ));
+
     let output_widget = Box::new(curl::RequestExecutor::new());
     let mut initally_selected_request = None;
     let mut initial_requests_vec = None;

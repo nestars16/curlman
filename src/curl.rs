@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::{collections::HashMap, io::Read, sync::atomic::AtomicU16};
 
 use crate::{
     editor::{self, CurlmanWidget, InputListener, WidgetCommand},
@@ -9,20 +9,29 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use curl::easy::{Easy, List, ReadError};
-use http::Method;
+use http::{HeaderName, Method};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Style, Stylize},
-    text::Text,
+    text::{Line, Text},
     widgets::{Block, StatefulWidgetRef, Widget},
 };
+
+trait RequestOutputFormatter {
+    fn format(&mut self, input: &[u8]) -> Vec<Line>;
+}
 
 pub struct RequestExecutor {
     block: Block<'static>,
     selected: bool,
-    cursor_idx: usize,
+    col: usize,
+    row: usize,
+    top_col: AtomicU16,
+    formatter: Option<Box<dyn RequestOutputFormatter>>,
+    handle: Easy,
     output_data: Vec<u8>,
+    headers: HashMap<HeaderName, String>,
     request: Option<RequestInfo>,
 }
 
@@ -33,13 +42,16 @@ impl RequestExecutor {
             selected: false,
             output_data: Vec::new(),
             request: None,
-            cursor_idx: 0,
+            col: 0,
+            row: 0,
+            top_col: AtomicU16::new(0),
+            headers: HashMap::new(),
+            handle: Easy::new(),
+            formatter: None,
         }
     }
 
     pub fn perform_request(&mut self) -> Result<(), Error> {
-        let mut handle = Easy::new();
-
         let Some(req) = self.request.clone() else {
             return Err(Error::InvalidState);
         };
@@ -48,21 +60,37 @@ impl RequestExecutor {
             return Err(Error::InvalidUrl);
         };
 
-        handle.url(url.as_ref())?;
+        self.headers.clear();
+        self.handle.url(url.as_ref())?;
         let mut header_list = List::new();
-
         for (key, value) in req.headers {
             header_list.append(&format!("{key}: {value}"))?;
         }
-        handle.http_headers(header_list)?;
-        handle.timeout(req.timeout)?;
+        self.handle.http_headers(header_list)?;
+        self.handle.timeout(req.timeout)?;
+
         match req.method {
             Method::GET => {
-                handle.get(true)?;
+                self.handle.get(true)?;
+                let mut transfer = self.handle.transfer();
 
-                let mut transfer = handle.transfer();
+                transfer.header_function(|into| {
+                    match String::from_utf8_lossy(into).split_once(':') {
+                        Some((header_name, header_value)) => 'some_block: {
+                            let header_name_parse_res = header_name.parse::<HeaderName>();
+                            let Ok(header_name) = header_name_parse_res else {
+                                break 'some_block;
+                            };
+                            self.headers.insert(header_name, header_value.to_string());
+                            eprintln!("{:?}", self.headers);
+                        }
+                        None => {}
+                    };
 
-                transfer.write_function(move |data| {
+                    true
+                })?;
+
+                transfer.write_function(|data| {
                     self.output_data.extend_from_slice(data);
                     Ok(data.len())
                 })?;
@@ -70,15 +98,34 @@ impl RequestExecutor {
                 transfer.perform().map_err(|e| e.into())
             }
             Method::POST => {
-                handle.post(true)?;
+                self.handle.post(true)?;
                 let Some(body) = req.body else {
                     return Err(Error::NoBody);
                 };
+                let mut transfer = self.handle.transfer();
+                transfer.header_function(|into| {
+                    match String::from_utf8_lossy(into).split_once(':') {
+                        Some((header_name, header_value)) => 'some_block: {
+                            let header_name_parse_res = header_name.parse::<HeaderName>();
 
-                let mut transfer = handle.transfer();
+                            let Ok(header_name) = header_name_parse_res else {
+                                break 'some_block;
+                            };
+                            self.headers.insert(header_name, header_value.to_string());
+                        }
+                        None => {}
+                    };
+                    true
+                })?;
+
                 transfer.read_function(|into| match body.as_slice().read(into) {
                     Ok(read) => Ok(read),
                     Err(_) => Err(ReadError::Abort),
+                })?;
+
+                transfer.write_function(|data| {
+                    self.output_data.extend_from_slice(data);
+                    Ok(data.len())
                 })?;
 
                 transfer.perform().map_err(|e| e.into())
@@ -88,6 +135,8 @@ impl RequestExecutor {
             }
         }
     }
+
+    pub fn get_formatted_output() {}
 }
 
 impl StatefulWidgetRef for RequestExecutor {
@@ -100,8 +149,11 @@ impl StatefulWidgetRef for RequestExecutor {
     #[doc = " to implement a custom stateful widget."]
     fn render_ref(&self, area: Rect, buf: &mut Buffer, _: &mut Self::State) {
         let text_area = self.block.inner(area);
+
         let inner = Text::from(String::from_utf8(self.output_data.clone()).unwrap());
+
         self.block.clone().render(area, buf);
+
         inner.render(text_area, buf);
     }
 }
@@ -116,29 +168,7 @@ impl InputListener for RequestExecutor {
                     code: KeyCode::Char(ch),
                     modifiers: KeyModifiers::CONTROL,
                     ..
-                } => match ch {
-                    keys::UP => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Up,
-                        })
-                    }
-                    keys::DOWN => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Down,
-                        })
-                    }
-                    keys::LEFT => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Left,
-                        })
-                    }
-                    keys::RIGHT => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Right,
-                        })
-                    }
-                    _ => {}
-                },
+                } => return editor::widget_common::move_widget_selection(ch),
                 KeyEvent {
                     code: KeyCode::Char(ch),
                     ..
@@ -167,7 +197,6 @@ impl InputListener for RequestExecutor {
 impl CurlmanWidget for RequestExecutor {
     fn toggle_selected(&mut self) {
         self.selected = !self.selected;
-
         if self.selected {
             self.block = Block::bordered().border_style(Style::new().red());
         } else {

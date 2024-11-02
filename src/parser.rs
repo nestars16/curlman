@@ -1,7 +1,7 @@
 use http::Method;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, is_not, tag, take, take_till, take_while, take_while1},
+    bytes::complete::{escaped, is_not, tag, take, take_till, take_till1, take_while, take_while1},
     character::complete::{char, multispace0, multispace1, none_of},
     combinator::recognize,
     error::{Error, ErrorKind},
@@ -68,39 +68,32 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo> {
 
     let (input, _) = multispace0(input)?;
     let tag_parser = take_while(|ch: char| ch.is_ascii_alphanumeric());
-
     let param_parser = recognize(pair(
         take_while(|ch: char| ch == '-'),
         take_while(|ch: char| ch.is_ascii_alphanumeric()),
     ));
-
     let (input, params) = separated_list0(
         multispace1,
         separated_pair(param_parser, multispace1, alt((string_parser, tag_parser))),
     )(input)?;
-
     let mut request_info = RequestInfo::default();
     for (param_type, value) in params {
         let param_type_res: Result<CurlmanRequestParamType, _> = param_type.parse();
-
         let Ok(param_type) = param_type_res else {
             return Err(nom::Err::Failure(Error {
                 input,
                 code: ErrorKind::IsNot,
             }));
         };
-
         match param_type {
             CurlmanRequestParamType::Method => {
                 let method_res: Result<Method, _> = value.parse();
-
                 let Ok(method) = method_res else {
                     return Err(nom::Err::Failure(Error {
                         input,
                         code: ErrorKind::IsNot,
                     }));
                 };
-
                 request_info.method = method
             }
             CurlmanRequestParamType::Header => {
@@ -135,9 +128,16 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
             code: ErrorKind::IsNot,
         }));
     };
+
+    if input.is_empty() {
+        return Ok(("", RequestInfo::default_with_url(url)));
+    }
+
     let (input, _) = multispace1(input)?;
+
     let (input, mut request_builder) = parse_curl_params(input)?;
     let (input, _) = multispace0(input)?;
+
     request_builder.url = Some(url);
     Ok((input, request_builder))
 }
@@ -149,7 +149,6 @@ struct Request {
 
 pub fn parse_curlman_request_file(input: &str) -> IResult<&str, Vec<RequestInfo>> {
     let (input, requests) = separated_list0(tag("==="), parse_curlman_request)(input)?;
-
     Ok((input, requests))
 }
 
@@ -308,20 +307,74 @@ pub fn parse_curlman_editor<'a>(
 #[cfg(test)]
 mod tests {
 
+    use std::{collections::HashMap, time::Duration};
+
     use crate::editor::colors::get_default_colorscheme;
 
     use super::*;
 
     #[test]
-    fn test_request_parser() {
+    fn test_individual_request_parser() {
+        let input = r#"
+                    curl http://example.com
+                "#;
+
+        let parse_result = parse_curlman_request(input);
+        let Ok((_, request)) = parse_result else {
+            panic!("Individual request #1 parsing failed : {:?}", parse_result);
+        };
+
+        assert_eq!(
+            request,
+            RequestInfo {
+                headers: HashMap::new(),
+                url: Some("http://example.com".parse::<Url>().unwrap()),
+                method: http::Method::GET,
+                timeout: Duration::from_secs(30),
+                body: None
+            }
+        );
+        let input = r#"curl http://example.com"#;
+        let parse_result = parse_curlman_request(input);
+
+        let Ok((_, request)) = parse_result else {
+            panic!("Individual request #2 parsing failed : {:?}", parse_result);
+        };
+
+        assert_eq!(
+            request,
+            RequestInfo {
+                headers: HashMap::new(),
+                url: Some("http://example.com".parse::<Url>().unwrap()),
+                method: http::Method::GET,
+                timeout: Duration::from_secs(30),
+                body: None
+            }
+        );
+
         let input = r#"
             curl http://example.com
-            -X POST 
-            -H "Authorization: Bearer ${TOKEN}"
+            -X POST
+            -H "Authorization: Basic ${TOKEN}"
+            --data '{"json_is_awesome":true, "count": 0, "test": [1,2,3]}'
         "#;
-
-        let res = parse_curlman_request(input);
-        assert!(res.is_ok())
+        let parse_result = parse_curlman_request(input);
+        let Ok((_, request)) = parse_result else {
+            panic!("Individual request #3 parsing failed : {:?}", parse_result);
+        };
+        assert_eq!(
+            request,
+            RequestInfo {
+                headers: HashMap::from([(
+                    "Authorization".to_string(),
+                    " Basic ${TOKEN}".to_string()
+                )]),
+                url: Some("http://example.com".parse::<Url>().unwrap()),
+                method: http::Method::POST,
+                timeout: Duration::from_secs(30),
+                body: Some("{\"json_is_awesome\":true, \"count\": 0, \"test\": [1,2,3]}".into()),
+            }
+        );
     }
 
     #[test]
@@ -341,18 +394,81 @@ mod tests {
     fn test_request_file_parser() {
         let input = r#"
             curl http://example.com
-            -X GET 
-            -H "Authorization: Bearer ${TOKEN}"
 
             ===
+
             curl http://example.com
             -X POST 
             -H "Authorization: Bearer ${TOKEN}"
-            --data '{"json_is" : "cool", "right" : false}'
+            --data '{"json_is" : "cool", "right" : false}'"#;
 
+        let file_parse_result = parse_curlman_request_file(input);
+
+        let Ok((_, requests)) = file_parse_result else {
+            panic!("Failed to parse request file #1 {:?}", file_parse_result);
+        };
+
+        assert_eq!(
+            requests,
+            vec![
+                RequestInfo {
+                    headers: HashMap::new(),
+                    url: Some("http://example.com".parse::<Url>().unwrap()),
+                    method: http::Method::GET,
+                    timeout: Duration::from_secs(30),
+                    body: None
+                },
+                RequestInfo {
+                    headers: HashMap::from([(
+                        "Authorization".to_string(),
+                        " Bearer ${TOKEN}".to_string()
+                    )]),
+                    url: Some("http://example.com".parse::<Url>().unwrap()),
+                    method: http::Method::POST,
+                    timeout: Duration::from_secs(30),
+                    body: Some("{\"json_is\" : \"cool\", \"right\" : false}".into()),
+                }
+            ]
+        );
+
+        let input = r#"curl http://example.com"#;
+
+        let file_parse_result = parse_curlman_request_file(input);
+
+        let Ok((_, requests)) = file_parse_result else {
+            panic!("Failed to parse request file #2 {:?}", file_parse_result);
+        };
+
+        assert_eq!(
+            requests,
+            vec![RequestInfo {
+                headers: HashMap::new(),
+                url: Some("http://example.com".parse::<Url>().unwrap()),
+                method: http::Method::GET,
+                timeout: Duration::from_secs(30),
+                body: None
+            },]
+        );
+
+        let input = r#"
+            curl http://example.com
         "#;
 
-        let res = parse_curlman_request_file(input);
-        assert!(res.is_ok_and(|r| r.1.len() == 2))
+        let file_parse_result = parse_curlman_request_file(input);
+
+        let Ok((_, requests)) = file_parse_result else {
+            panic!("Failed to parse request file #3 {:?}", file_parse_result);
+        };
+
+        assert_eq!(
+            requests,
+            vec![RequestInfo {
+                headers: HashMap::new(),
+                url: Some("http://example.com".parse::<Url>().unwrap()),
+                method: http::Method::GET,
+                timeout: Duration::from_secs(30),
+                body: None
+            },]
+        )
     }
 }

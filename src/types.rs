@@ -98,6 +98,15 @@ pub struct RequestInfo {
     pub body: Option<Vec<u8>>,
 }
 
+impl RequestInfo {
+    pub fn default_with_url(url: Url) -> Self {
+        Self {
+            url: Some(url),
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for RequestInfo {
     fn default() -> Self {
         Self {

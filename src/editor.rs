@@ -2,14 +2,9 @@
 //Add vertical scrolling of text?
 //timeout for motions?
 
-use std::sync::atomic::AtomicU16;
-
+use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
 use colors::{get_default_colorscheme, Colorscheme};
-use crossterm::{
-    event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    terminal::window_size,
-};
-
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -18,7 +13,210 @@ use ratatui::{
     widgets::{Block, BorderType, List, Paragraph, StatefulWidgetRef},
 };
 
-use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
+use std::sync::atomic::AtomicU16;
+
+pub mod widget_common {
+    use ratatui::{
+        layout::Rect,
+        style::Color,
+        style::Stylize,
+        text::{Line, Span},
+    };
+
+    use crate::keys;
+
+    use super::{CursorMovement, WidgetCommand};
+
+    pub fn adjust_viewport(editor_height: i32, top_row: i32, current_row: i32) -> Option<u16> {
+        let row_pos_in_viewport = top_row + editor_height - current_row;
+
+        if row_pos_in_viewport <= 0 {
+            Some((top_row + 1) as u16)
+        } else if row_pos_in_viewport >= editor_height {
+            Some(current_row as u16)
+        } else {
+            None
+        }
+    }
+
+    pub fn move_widget_selection(pressed: char) -> Option<WidgetCommand> {
+        match pressed {
+            keys::UP => {
+                return Some(WidgetCommand::MoveWidgetSelection {
+                    direction: keys::Direction::Up,
+                })
+            }
+            keys::DOWN => {
+                return Some(WidgetCommand::MoveWidgetSelection {
+                    direction: keys::Direction::Down,
+                })
+            }
+            keys::LEFT => {
+                return Some(WidgetCommand::MoveWidgetSelection {
+                    direction: keys::Direction::Left,
+                })
+            }
+            keys::RIGHT => {
+                return Some(WidgetCommand::MoveWidgetSelection {
+                    direction: keys::Direction::Right,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_next_cursor_position(
+        current_row: usize,
+        current_col: usize,
+        lines: &Vec<String>,
+        operator: CursorMovement,
+    ) -> Option<(usize, usize)> {
+        fn fit_col(col: usize, line: &str) -> usize {
+            std::cmp::min(col, line.chars().count())
+        }
+        match operator {
+            CursorMovement::Right if current_col >= lines[current_row].chars().count() => {
+                (current_row + 1 < lines.len()).then(|| (current_row + 1, 0))
+            }
+            CursorMovement::Right => Some((current_row, current_col + 1)),
+            CursorMovement::Left if current_col == 0 => {
+                let row = current_row.checked_sub(1)?;
+                Some((row, lines[row].chars().count()))
+            }
+            CursorMovement::Left => Some((current_row, current_col - 1)),
+            CursorMovement::Up => {
+                let row = current_row.checked_sub(1)?;
+                Some((row, fit_col(current_col, &lines[row])))
+            }
+            CursorMovement::Down => Some((
+                current_row + 1,
+                fit_col(current_col, lines.get(current_row + 1)?),
+            )),
+            CursorMovement::UntilStartOfLine => Some((current_row, 0)),
+            CursorMovement::UntilEndOfLine => {
+                Some((current_row, lines[current_row].chars().count()))
+            }
+            CursorMovement::UntilStartOfBuffer => Some((0, fit_col(current_col, &lines[0]))),
+            CursorMovement::UntilEndOfBuffer => {
+                let row = lines.len() - 1;
+                Some((row, fit_col(current_col, &lines[row])))
+            }
+            CursorMovement::Until(_) => None,
+            CursorMovement::Whole => None,
+        }
+    }
+
+    #[inline]
+    pub fn fit_tokens_into_editor_window<'widget>(
+        editor_col: usize,
+        text: &'widget str,
+        color: Color,
+        area: &Rect,
+        cursor_has_to_be_set: bool,
+        is_cursor_set: &mut bool,
+        current_col: &mut usize,
+        lines: &mut Vec<Line<'widget>>,
+        spans: &mut Vec<Span<'widget>>,
+    ) {
+        let will_overflow = *current_col + text.len() > area.width as usize;
+        match (cursor_has_to_be_set, will_overflow) {
+            (false, false) => {
+                spans.push(Span::raw(text).fg(color));
+            }
+            (true, false) => {
+                *is_cursor_set = true;
+                let split_val = editor_col - *current_col;
+                let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
+                spans.push(Span::raw(before_cursor).fg(color));
+                let (cursor_char, rest_of_span) =
+                    (&at_and_before_cursor[..1], &at_and_before_cursor[1..]);
+                spans.push(Span::raw(cursor_char).fg(color).reversed());
+                spans.push(Span::raw(rest_of_span).fg(color));
+            }
+            (false, true) => {
+                let remaining_space_in_line = area.width as usize - *current_col;
+                let (start, mut end) = text.split_at(remaining_space_in_line);
+                spans.push(Span::raw(start).fg(color));
+                lines.push(Line::from(std::mem::take(spans)));
+                while end.len() > area.width as usize {
+                    spans.push(Span::raw(&end[..area.width as usize]).fg(color));
+                    lines.push(Line::from(std::mem::take(spans)));
+                    end = &end[area.width as usize..];
+                }
+                spans.push(Span::raw(end).fg(color));
+                *current_col = end.len().checked_sub(1).unwrap_or(0);
+            }
+            (true, true) => {
+                *is_cursor_set = true;
+                let mut remaining_space_in_line = area.width as usize - *current_col;
+
+                let line_cursor_idx = editor_col - *current_col;
+
+                let (before_cursor, containing_and_after_cursor) = text.split_at(line_cursor_idx);
+
+                match before_cursor.len() < remaining_space_in_line {
+                    true => {
+                        spans.push(Span::raw(before_cursor).fg(color));
+                        remaining_space_in_line -= before_cursor.len();
+                    }
+                    false => {
+                        spans.push(Span::raw(&before_cursor[..remaining_space_in_line]).fg(color));
+                        lines.push(Line::from(std::mem::take(spans)));
+                        let mut remaining_before_cursor_text =
+                            &before_cursor[remaining_space_in_line..];
+
+                        while remaining_before_cursor_text.len() > area.width as usize {
+                            spans.push(
+                                Span::raw(&remaining_before_cursor_text[..area.width as usize])
+                                    .fg(color),
+                            );
+                            lines.push(Line::from(std::mem::take(spans)));
+                            remaining_before_cursor_text =
+                                &remaining_before_cursor_text[area.width as usize..];
+                        }
+
+                        spans.push(Span::raw(remaining_before_cursor_text).fg(color));
+                        remaining_space_in_line =
+                            area.width as usize - remaining_before_cursor_text.len();
+                    }
+                }
+                match containing_and_after_cursor.len() {
+                    0 => {}
+                    1 => {
+                        spans.push(Span::raw(containing_and_after_cursor).fg(color).reversed());
+                    }
+                    _ => {
+                        let cursor_char = &containing_and_after_cursor[..1];
+                        assert!(cursor_char.len() == 1);
+                        spans.push(Span::raw(cursor_char).fg(color).reversed());
+                        remaining_space_in_line = match remaining_space_in_line.checked_sub(1) {
+                            Some(new) => new,
+                            None => {
+                                lines.push(Line::from(std::mem::take(spans)));
+                                area.width as usize
+                            }
+                        };
+                        let mut after_cursor = &containing_and_after_cursor[1..];
+                        dbg!(after_cursor);
+                        dbg!(remaining_space_in_line);
+                        while after_cursor.len() > remaining_space_in_line {
+                            spans.push(
+                                Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
+                            );
+
+                            lines.push(Line::from(std::mem::take(spans)));
+                            after_cursor = &after_cursor[remaining_space_in_line..];
+
+                            remaining_space_in_line = area.width as usize;
+                        }
+                        spans.push(Span::raw(after_cursor).fg(color));
+                        *current_col = after_cursor.len();
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub mod colors {
     use ratatui::style::Color;
@@ -198,7 +396,7 @@ pub struct Editor<'editor> {
 }
 
 impl<'editor> Editor<'editor> {
-    pub fn new() -> Self {
+    pub fn new(start_state: Vec<String>) -> Self {
         Self {
             block: Block::bordered().border_style(Style::new().red()),
             tab_len: 4,
@@ -214,109 +412,10 @@ impl<'editor> Editor<'editor> {
             selected: true,
             col: 0,
             row: 0,
-            lines: vec![String::from("")],
+            lines: start_state,
             colorscheme: get_default_colorscheme(),
             top_row: 0,
             editor_height: AtomicU16::new(0),
-        }
-    }
-
-    fn process_token(
-        &self,
-        text: &'editor str,
-        color: Color,
-        area: &Rect,
-        cursor_has_to_be_set: bool,
-        is_cursor_set: &mut bool,
-        current_col: &mut usize,
-        lines: &mut Vec<Line<'editor>>,
-        spans: &mut Vec<Span<'editor>>,
-    ) {
-        let will_overflow = *current_col + text.len() > area.width as usize;
-        match (cursor_has_to_be_set, will_overflow) {
-            (false, false) => {
-                spans.push(Span::raw(text).fg(color));
-            }
-            (true, false) => {
-                *is_cursor_set = true;
-                let split_val = self.col - *current_col;
-                let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
-                spans.push(Span::raw(before_cursor).fg(color));
-                let (cursor_char, rest_of_span) =
-                    (&at_and_before_cursor[..1], &at_and_before_cursor[1..]);
-                spans.push(Span::raw(cursor_char).fg(color).reversed());
-                spans.push(Span::raw(rest_of_span).fg(color));
-            }
-            (false, true) => {
-                let remaining_space_in_line = area.width as usize - *current_col;
-                let (start, mut end) = text.split_at(remaining_space_in_line);
-                spans.push(Span::raw(start).fg(color));
-                lines.push(Line::from(std::mem::take(spans)));
-                while end.len() > area.width as usize {
-                    spans.push(Span::raw(&end[..area.width as usize]).fg(color));
-                    lines.push(Line::from(std::mem::take(spans)));
-                    end = &end[area.width as usize..];
-                }
-                spans.push(Span::raw(end).fg(color));
-                *current_col = end.len().checked_sub(1).unwrap_or(0);
-            }
-            (true, true) => {
-                *is_cursor_set = true;
-                let mut remaining_space_in_line = area.width as usize - *current_col;
-                let line_cursor_idx = self.col - *current_col;
-
-                let (before_cursor, containing_and_after_cursor) = text.split_at(line_cursor_idx);
-
-                match before_cursor.len() < remaining_space_in_line {
-                    true => {
-                        spans.push(Span::raw(before_cursor).fg(color));
-                        remaining_space_in_line -= before_cursor.len();
-                    }
-                    false => {
-                        spans.push(Span::raw(&before_cursor[..remaining_space_in_line]).fg(color));
-                        lines.push(Line::from(std::mem::take(spans)));
-                        let mut remaining_before_cursor_text =
-                            &before_cursor[remaining_space_in_line..];
-
-                        while remaining_before_cursor_text.len() > area.width as usize {
-                            spans.push(
-                                Span::raw(&remaining_before_cursor_text[..area.width as usize])
-                                    .fg(color),
-                            );
-                            lines.push(Line::from(std::mem::take(spans)));
-                            remaining_before_cursor_text =
-                                &remaining_before_cursor_text[area.width as usize..];
-                        }
-
-                        spans.push(Span::raw(remaining_before_cursor_text).fg(color));
-                    }
-                }
-
-                match containing_and_after_cursor.len() {
-                    0 => {}
-                    1 => {
-                        spans.push(Span::raw(containing_and_after_cursor).fg(color).reversed());
-                    }
-                    _ => {
-                        let cursor_char = &containing_and_after_cursor[..1];
-                        assert!(cursor_char.len() == 1);
-                        spans.push(Span::raw(cursor_char).fg(color).reversed());
-                        let mut after_cursor = &containing_and_after_cursor[1..];
-
-                        while after_cursor.len() > remaining_space_in_line {
-                            spans.push(
-                                Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
-                            );
-                            lines.push(Line::from(std::mem::take(spans)));
-                            after_cursor = &after_cursor[remaining_space_in_line - 1..];
-                            remaining_space_in_line = area.width as usize;
-                        }
-
-                        spans.push(Span::raw(after_cursor).fg(color));
-                        *current_col = after_cursor.len();
-                    }
-                }
-            }
         }
     }
 
@@ -348,26 +447,32 @@ impl<'editor> Editor<'editor> {
                     | crate::parser::Token::ParamKey(text, color)
                     | crate::parser::Token::ParamValue(text, color)
                     | crate::parser::Token::Unknown(text, color)
-                    | crate::parser::Token::Separator(text, color) => self.process_token(
-                        text,
-                        color,
-                        &area,
-                        cursor_has_to_be_set,
-                        &mut is_cursor_set,
-                        &mut current_col,
-                        &mut lines,
-                        &mut spans,
-                    ),
-                    crate::parser::Token::Whitespace(text) => self.process_token(
-                        text,
-                        Color::White,
-                        &area,
-                        cursor_has_to_be_set,
-                        &mut is_cursor_set,
-                        &mut current_col,
-                        &mut lines,
-                        &mut spans,
-                    ),
+                    | crate::parser::Token::Separator(text, color) => {
+                        widget_common::fit_tokens_into_editor_window(
+                            self.col,
+                            text,
+                            color,
+                            &area,
+                            cursor_has_to_be_set,
+                            &mut is_cursor_set,
+                            &mut current_col,
+                            &mut lines,
+                            &mut spans,
+                        )
+                    }
+                    crate::parser::Token::Whitespace(text) => {
+                        widget_common::fit_tokens_into_editor_window(
+                            self.col,
+                            text,
+                            Color::White,
+                            &area,
+                            cursor_has_to_be_set,
+                            &mut is_cursor_set,
+                            &mut current_col,
+                            &mut lines,
+                            &mut spans,
+                        )
+                    }
                 };
 
                 current_col += line_token_len;
@@ -459,7 +564,7 @@ impl<'editor> Editor<'editor> {
         match command {
             VimCommand::Save => {
                 return Some(WidgetCommand::Save {
-                    text: String::new(),
+                    text: self.lines.join("\n"),
                 });
             }
             VimCommand::Quit => {
@@ -546,29 +651,7 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Char(ch),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            } => match ch {
-                keys::UP => {
-                    return Some(WidgetCommand::MoveWidgetSelection {
-                        direction: keys::Direction::Up,
-                    })
-                }
-                keys::DOWN => {
-                    return Some(WidgetCommand::MoveWidgetSelection {
-                        direction: keys::Direction::Down,
-                    })
-                }
-                keys::LEFT => {
-                    return Some(WidgetCommand::MoveWidgetSelection {
-                        direction: keys::Direction::Left,
-                    })
-                }
-                keys::RIGHT => {
-                    return Some(WidgetCommand::MoveWidgetSelection {
-                        direction: keys::Direction::Right,
-                    })
-                }
-                _ => {}
-            },
+            } => return widget_common::move_widget_selection(ch),
             KeyEvent {
                 code: KeyCode::Char(ch),
                 ..
@@ -697,57 +780,22 @@ impl<'editor> Editor<'editor> {
             .editor_height
             .load(std::sync::atomic::Ordering::Relaxed);
 
-        let row_pos_in_viewport = self.top_row as i32 + editor_height_val as i32 - self.row as i32;
-
-        if row_pos_in_viewport <= 0 {
-            self.top_row += 1;
-        } else if row_pos_in_viewport >= editor_height_val as i32 {
-            self.top_row = self.row as u16;
+        if let Some(new_top_row) = widget_common::adjust_viewport(
+            editor_height_val as i32,
+            self.top_row as i32,
+            self.row as i32,
+        ) {
+            self.top_row = new_top_row
         }
     }
 
     fn move_cursor(&mut self, operator: CursorMovement) {
-        if let Some((new_row, new_col)) = self.get_next_cursor_position(operator) {
+        if let Some((new_row, new_col)) =
+            widget_common::get_next_cursor_position(self.row, self.col, &self.lines, operator)
+        {
             self.col = new_col;
             self.row = new_row;
             self.adjust_viewport()
-        }
-    }
-
-    fn get_next_cursor_position(&self, operator: CursorMovement) -> Option<(usize, usize)> {
-        fn fit_col(col: usize, line: &str) -> usize {
-            std::cmp::min(col, line.chars().count())
-        }
-
-        match operator {
-            CursorMovement::Right if self.col >= self.lines[self.row].chars().count() => {
-                (self.row + 1 < self.lines.len()).then(|| (self.row + 1, 0))
-            }
-            CursorMovement::Right => Some((self.row, self.col + 1)),
-            CursorMovement::Left if self.col == 0 => {
-                let row = self.row.checked_sub(1)?;
-                Some((row, self.lines[row].chars().count()))
-            }
-            CursorMovement::Left => Some((self.row, self.col - 1)),
-            CursorMovement::Up => {
-                let row = self.row.checked_sub(1)?;
-                Some((row, fit_col(self.col, &self.lines[row])))
-            }
-            CursorMovement::Down => Some((
-                self.row + 1,
-                fit_col(self.col, self.lines.get(self.row + 1)?),
-            )),
-            CursorMovement::UntilStartOfLine => Some((self.row, 0)),
-            CursorMovement::UntilEndOfLine => {
-                Some((self.row, self.lines[self.row].chars().count()))
-            }
-            CursorMovement::UntilStartOfBuffer => Some((0, fit_col(self.col, &self.lines[0]))),
-            CursorMovement::UntilEndOfBuffer => {
-                let row = self.lines.len() - 1;
-                Some((row, fit_col(self.col, &self.lines[row])))
-            }
-            CursorMovement::Until(_) => None,
-            CursorMovement::Whole => None,
         }
     }
 
@@ -766,13 +814,11 @@ impl<'editor> Editor<'editor> {
 
     fn forward_delete(&mut self) {}
 }
-
 impl<'editor> StatefulWidgetRef for Editor<'editor> {
     #[doc = " State associated with the stateful widget."]
     #[doc = ""]
     #[doc = " If you don\'t need this then you probably want to implement [`WidgetRef`] instead."]
     type State = AppState;
-
     #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
     #[doc = " to implement a custom stateful widget."]
     fn render_ref(&self, area: Rect, buf: &mut Buffer, _: &mut Self::State) {
@@ -802,13 +848,15 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
 
         inner_editor_content.render(editor_area, buf);
         let EditorMode::Vim { ref state, .. } = self.current_mode;
-        const MOTION_BUFFER_RENDER_LEN: i16 = 16;
+        const MOTION_BUFFER_RENDER_LEN: u16 = 16;
 
         let status_bar_str = if matches!(state.current_state, VimState::WritingCommand) {
             format!(":{}", &state.command_buff)
         } else {
-            let number_of_spaces = command_bar_area.width as isize
-                - (state.repeat_n.len() as isize + MOTION_BUFFER_RENDER_LEN as isize);
+            let number_of_spaces = command_bar_area
+                .width
+                .checked_sub(state.repeat_n.len() as u16 + MOTION_BUFFER_RENDER_LEN)
+                .unwrap_or(0);
 
             format!(
                 "{}{}{:?}",
@@ -858,7 +906,7 @@ impl<'editor> CurlmanWidget for Editor<'editor> {
         }
     }
 
-    fn update_shared_state(&mut self, _: &AppState) -> Result<(), Error> {
+    fn update_shared_state(&mut self, state: &AppState) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -894,6 +942,7 @@ impl<'browser> StatefulWidgetRef for RequestBrowser<'browser> {
         .direction(ratatui::widgets::ListDirection::TopToBottom)
         .highlight_symbol("-> ")
         .highlight_style(Style::new().reversed());
+
         requests.render_ref(area, buf, &mut state.list_state);
     }
 }
@@ -901,36 +950,12 @@ impl<'browser> StatefulWidgetRef for RequestBrowser<'browser> {
 impl<'browser> InputListener for RequestBrowser<'browser> {
     fn handle_event(&mut self, e: Event) -> Option<WidgetCommand> {
         match e {
-            Event::FocusGained => todo!(),
-            Event::FocusLost => todo!(),
             Event::Key(key_event) => match key_event {
                 KeyEvent {
                     code: KeyCode::Char(ch),
                     modifiers: KeyModifiers::CONTROL,
                     ..
-                } => match ch {
-                    keys::UP => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Up,
-                        })
-                    }
-                    keys::DOWN => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Down,
-                        })
-                    }
-                    keys::LEFT => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Left,
-                        })
-                    }
-                    keys::RIGHT => {
-                        return Some(WidgetCommand::MoveWidgetSelection {
-                            direction: keys::Direction::Right,
-                        })
-                    }
-                    _ => {}
-                },
+                } => return widget_common::move_widget_selection(ch),
                 KeyEvent {
                     code: KeyCode::Char(ch),
                     ..
@@ -963,9 +988,7 @@ impl<'browser> InputListener for RequestBrowser<'browser> {
                 }
                 _ => {}
             },
-            Event::Mouse(_) => todo!(),
-            Event::Paste(_) => todo!(),
-            Event::Resize(_, _) => todo!(),
+            _ => {}
         };
 
         None
@@ -1004,6 +1027,7 @@ impl<'browser> CurlmanWidget for RequestBrowser<'browser> {
     }
     fn update_shared_state(&mut self, new_state: &AppState) -> Result<(), Error> {
         self.requests = Some(new_state.requests.clone());
+        self.selected_request_idx = new_state.selected_request_idx;
         Ok(())
     }
 }
