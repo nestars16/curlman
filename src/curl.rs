@@ -1,4 +1,9 @@
-use std::{collections::HashMap, io::Read, sync::atomic::AtomicU16};
+use std::{
+    collections::HashMap,
+    ffi::{CStr, CString},
+    io::Read,
+    sync::atomic::AtomicU16,
+};
 
 use crate::{
     editor::{
@@ -7,21 +12,25 @@ use crate::{
         CurlmanWidget, InputListener, WidgetCommand,
     },
     error::Error,
-    parser::{parse_json_value, JsonToken},
+    parser::JsonToken,
     types::RequestInfo,
     AppState,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use curl::easy::{Easy, List, ReadError};
 use http::{HeaderName, Method};
+use jq_sys::{
+    jv_copy, jv_dump_string, jv_free, jv_get_kind, jv_invalid_get_msg, jv_invalid_has_msg,
+    jv_kind_JV_KIND_INVALID, jv_parse, jv_print_flags_JV_PRINT_PRETTY,
+    jv_print_flags_JV_PRINT_SPACE1, jv_string_value,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Style, Stylize},
-    text::Text,
+    text::{Span, Text},
     widgets::{Block, StatefulWidgetRef, Widget},
 };
-use serde_json::Value;
 
 #[derive(Debug)]
 enum FormatterError {
@@ -37,6 +46,7 @@ pub struct RequestExecutor {
     json_formatter: JsonFormatter,
     handle: Easy,
     output_data: Vec<u8>,
+    editor_representation: Vec<String>,
     headers: HashMap<HeaderName, String>,
     request: Option<RequestInfo>,
 }
@@ -56,6 +66,7 @@ impl RequestExecutor {
             json_formatter: JsonFormatter {
                 colorscheme: get_default_output_colorscheme(),
             },
+            editor_representation: Vec::new(),
         }
     }
 
@@ -147,16 +158,15 @@ impl RequestExecutor {
     }
 
     pub fn fit_json_parser_output(&self, tokenized_lines: Vec<Vec<JsonToken>>, area: Rect) -> Text {
-        let mut spans = Vec::new();
-        let mut lines = Vec::new();
+        let mut spans: Vec<Span> = Vec::new();
 
+        let mut lines = Vec::new();
         for (row_idx, line) in tokenized_lines.into_iter().enumerate() {
             if row_idx < self.top_row as usize
                 || row_idx >= self.top_row as usize + area.height as usize
             {
                 continue;
             }
-
             let mut current_col = 0;
             for token in line {
                 let color = token.get_color(&self.json_formatter.colorscheme);
@@ -168,11 +178,12 @@ impl RequestExecutor {
                     | JsonToken::ValueSeparator(text)
                     | JsonToken::Literal(text)
                     | JsonToken::String(text)
-                    | JsonToken::Whitespace(text) => {}
+                    | JsonToken::Whitespace(text)
+                    | JsonToken::Identifier(text)
+                    | JsonToken::Invalid(text) => {}
                 }
             }
         }
-
         Text::from(lines)
     }
 
@@ -220,7 +231,13 @@ impl InputListener for RequestExecutor {
                     if ch == 'E' {
                         self.output_data.clear();
                         match self.perform_request() {
-                            Ok(_) => {}
+                            Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
+                                Some(content_type) => match content_type.as_str() {
+                                    "application/json" => {}
+                                    _ => {}
+                                },
+                                None => {}
+                            },
                             Err(e) => {
                                 self.output_data = format!("There was an error\n{:?}", e).into()
                             }
@@ -261,12 +278,68 @@ struct JsonFormatter {
 }
 
 impl JsonFormatter {
-    fn format(&self, input: &[u8]) -> Result<Vec<Vec<JsonToken>>, FormatterError> {
-        let json_value: Value =
-            serde_json::from_slice(input).map_err(|_| FormatterError::InvalidInput)?;
+    fn format_output_data_into_lines(&self, input: &[u8]) -> Result<Vec<String>, FormatterError> {
+        let input_str = CString::new(input).map_err(|_| FormatterError::InvalidInput)?;
+        let input_jv = unsafe { jv_parse(input_str.as_ptr()) };
+        let jv_kind = unsafe { jv_get_kind(input_jv) };
 
-        let formatted = parse_json_value(&json_value, 0);
+        if jv_kind == jv_kind_JV_KIND_INVALID {
+            if unsafe { jv_invalid_has_msg(jv_copy(input_jv)) == 1 } {
+                let error = unsafe { jv_invalid_get_msg(input_jv) };
+                let jv_c_string_val = unsafe { jv_string_value(error) };
+                let jv_error_string = unsafe { CStr::from_ptr(jv_c_string_val) }.to_string_lossy();
+                unsafe { jv_free(error) }
+            } else {
+                unsafe { jv_free(input_jv) }
+            }
 
-        Ok(formatted)
+            return Err(FormatterError::InvalidInput);
+        }
+
+        let dump_string = unsafe {
+            jv_dump_string(
+                input_jv,
+                (jv_print_flags_JV_PRINT_PRETTY | jv_print_flags_JV_PRINT_SPACE1) as i32,
+            )
+        };
+        let jv_c_string_val = unsafe { jv_string_value(dump_string) };
+        let jv_output_string = unsafe { CStr::from_ptr(jv_c_string_val) }.to_string_lossy();
+        unsafe { jv_free(dump_string) };
+        Ok(jv_output_string.split('\n').map(|l| l.to_owned()).collect())
+    }
+}
+
+mod tests {
+    use super::JsonFormatter;
+    use crate::editor::colors::get_default_output_colorscheme;
+    use jq_sys::{jq_init, jq_teardown};
+
+    #[test]
+    fn test_formatting_output_data_into_lines() {
+        let mut jq_state = unsafe { jq_init() };
+        if jq_state.is_null() {
+            panic!("Couldn't initialize jq");
+        }
+        let formatter = JsonFormatter {
+            colorscheme: get_default_output_colorscheme(),
+        };
+        let input = "{\"name\" : \"John\", \"age\": 30}";
+        let result = formatter.format_output_data_into_lines(input.as_bytes());
+
+        let Ok(lines) = result else {
+            panic!("Formatting output failed");
+        };
+
+        unsafe { jq_teardown(&mut jq_state) };
+
+        assert_eq!(
+            lines,
+            vec![
+                "{".to_string(),
+                "  \"name\": \"John\",".to_string(),
+                "  \"age\": 30".to_string(),
+                "}".to_string(),
+            ]
+        );
     }
 }

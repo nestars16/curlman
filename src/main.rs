@@ -12,6 +12,7 @@ use crossterm::{
 };
 
 use editor::WidgetCommand;
+use jq_sys::{jq_init, jq_state, jq_teardown};
 use parser::parse_curlman_request_file;
 use ratatui::widgets::ListState;
 
@@ -40,6 +41,15 @@ struct App {
     layouts: HashMap<u32, Layout>,
     selected_pane_id: u32,
     selected_widget_idx: usize,
+    jq_handle: *mut jq_state,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if !self.jq_handle.is_null() {
+            unsafe { jq_teardown(&mut self.jq_handle) }
+        }
+    }
 }
 
 //TODO
@@ -83,6 +93,7 @@ impl App {
         default_widget_idx: usize,
         file: File,
         state: AppState,
+        jq_handle: *mut jq_state,
     ) -> Self {
         assert_eq!(panes.len(), layouts.len());
 
@@ -104,6 +115,7 @@ impl App {
             state,
             request_file: file,
             previous_widget_indexes: None,
+            jq_handle,
         }
     }
 
@@ -394,7 +406,14 @@ fn main() -> Result<(), crate::error::Error> {
         }
     }
 
-    let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state);
+    let jq_state = unsafe { jq_init() };
+    if jq_state.is_null() {
+        ratatui::restore();
+        disable_raw_mode()?;
+        eprint!("Unable to start jq");
+        std::process::exit(1);
+    }
+    let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state, jq_state);
     app.run(&mut terminal)?;
     ratatui::restore();
     disable_raw_mode()?;

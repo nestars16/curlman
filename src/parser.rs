@@ -2,12 +2,13 @@ use http::Method;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, tag, take, take_till, take_while, take_while1},
-    character::complete::{char, multispace0, multispace1, none_of},
+    character::complete::{char, multispace0, multispace1, none_of, one_of},
     combinator::recognize,
     error::{Error, ErrorKind},
-    multi::separated_list0,
-    sequence::{delimited, pair, separated_pair, tuple},
-    IResult,
+    multi::{many0, many1, separated_list0},
+    number::complete::{float, recognize_float},
+    sequence::{delimited, pair, separated_pair, terminated, tuple},
+    IResult, Parser,
 };
 
 //TODO?
@@ -15,51 +16,55 @@ use nom::{
 //consider basic auth?
 //file uploads?
 
-use ratatui::{
-    style::{Color, Stylize},
-    text::Span,
-};
-use serde_json::Value;
-use url::{self, form_urlencoded::parse, Url};
+use ratatui::style::Color;
+use url::Url;
 
 use crate::{
     editor::colors::{EditorColorscheme, JsonOutputColorscheme},
     types::{BodyType, CurlmanRequestParamType, RequestInfo},
 };
 
+fn string_parser(input: &str) -> IResult<&str, &str> {
+    recognize(tuple((
+        tag("\""),
+        escaped(none_of("\\\""), '\\', take(1usize)),
+        tag("\""),
+    )))(input)
+}
+
 #[derive(Debug)]
 pub enum Token<'a> {
-    Curl(&'a str, Color),
-    Url(&'a str, Color),
-    ParamKey(&'a str, Color),
-    ParamValue(&'a str, Color),
+    Curl(&'a str),
+    Url(&'a str),
+    ParamKey(&'a str),
+    ParamValue(&'a str),
     Whitespace(&'a str),
-    Separator(&'a str, Color),
-    Unknown(&'a str, Color),
+    Separator(&'a str),
+    Unknown(&'a str),
 }
 
 impl<'a> Token<'a> {
     pub fn get_str(&self) -> &str {
         match self {
-            Token::Curl(text, ..) => text,
-            Token::Url(text, ..) => text,
-            Token::ParamKey(text, ..) => text,
-            Token::ParamValue(text, ..) => text,
-            Token::Whitespace(text, ..) => text,
-            Token::Separator(text, ..) => text,
-            Token::Unknown(text, ..) => text,
+            Token::Curl(text) => text,
+            Token::Url(text) => text,
+            Token::ParamKey(text) => text,
+            Token::ParamValue(text) => text,
+            Token::Whitespace(text) => text,
+            Token::Separator(text) => text,
+            Token::Unknown(text) => text,
         }
     }
 
-    pub fn get_color(&self) -> Option<Color> {
+    pub fn get_color(&self, colorscheme: &EditorColorscheme) -> Color {
         match self {
-            Token::Curl(.., color) => Some(*color),
-            Token::Url(.., color) => Some(*color),
-            Token::ParamKey(.., color) => Some(*color),
-            Token::ParamValue(.., color) => Some(*color),
-            Token::Separator(.., color) => Some(*color),
-            Token::Unknown(.., color) => Some(*color),
-            Token::Whitespace(_) => None,
+            Token::Curl(_) => colorscheme.curl_color,
+            Token::Url(_) => colorscheme.url_color,
+            Token::ParamKey(_) => colorscheme.param_key_color,
+            Token::ParamValue(_) => colorscheme.param_value_color,
+            Token::Separator(_) => colorscheme.separator_color,
+            Token::Unknown(_) => colorscheme.unknown_color,
+            Token::Whitespace(_) => Color::White,
         }
     }
 }
@@ -171,7 +176,6 @@ fn parse_curlman_editor_line<'a, 'b>(
     colorscheme: &EditorColorscheme,
 ) -> IResult<&'a str, Vec<Token<'a>>> {
     let mut line_tokens = Vec::new();
-
     match parser_state {
         RequestParserState::ExpectingCurl => {
             let (input, space) = multispace0(input)?;
@@ -181,7 +185,7 @@ fn parse_curlman_editor_line<'a, 'b>(
             }
 
             let (input, curl_tag) = tag("curl")(input)?;
-            line_tokens.push(Token::Curl(curl_tag, colorscheme.curl_color));
+            line_tokens.push(Token::Curl(curl_tag));
 
             let (input, space) = multispace0(input)?;
 
@@ -203,9 +207,9 @@ fn parse_curlman_editor_line<'a, 'b>(
             let (input, url_str) = take_till(char::is_whitespace)(input)?;
             let url_parse_res: Result<Url, _> = url_str.parse();
             line_tokens.push(if url_parse_res.is_ok() {
-                Token::Url(url_str, colorscheme.url_color)
+                Token::Url(url_str)
             } else {
-                Token::Unknown(url_str, colorscheme.unknown_color)
+                Token::Unknown(url_str)
             });
 
             let (input, space) = multispace0(input)?;
@@ -228,7 +232,7 @@ fn parse_curlman_editor_line<'a, 'b>(
             match separator_res {
                 Ok((input, separator)) => {
                     *parser_state = RequestParserState::ExpectingCurl;
-                    line_tokens.push(Token::Separator(separator, colorscheme.separator_color));
+                    line_tokens.push(Token::Separator(separator));
                     return Ok((input, line_tokens));
                 }
                 _ => {}
@@ -241,7 +245,7 @@ fn parse_curlman_editor_line<'a, 'b>(
 
             let (input, param) = param_parser(input)?;
 
-            line_tokens.push(Token::ParamKey(param, colorscheme.param_key_color));
+            line_tokens.push(Token::ParamKey(param));
 
             let (input, space) = multispace0(input)?;
             if !space.is_empty() {
@@ -259,20 +263,11 @@ fn parse_curlman_editor_line<'a, 'b>(
 
             let tag_parser = take_while1(|ch: char| ch.is_ascii_alphanumeric());
 
-            let string_parser = recognize(tuple((
-                tag("\""),
-                escaped(none_of("\\\""), '\\', take(1usize)),
-                tag("\""),
-            )));
-
             let mut param_value_parser = alt((string_parser, tag_parser));
 
             let (input, param_value) = param_value_parser(input)?;
 
-            line_tokens.push(Token::ParamValue(
-                param_value,
-                colorscheme.param_value_color,
-            ));
+            line_tokens.push(Token::ParamValue(param_value));
 
             *parser_state = RequestParserState::ExpectingParamKey;
 
@@ -298,7 +293,7 @@ pub fn parse_curlman_editor<'a>(
                     curr_str = input;
                 }
                 Err(_) => {
-                    line_tokens.push(Token::Unknown(curr_str, colorscheme.unknown_color));
+                    line_tokens.push(Token::Unknown(curr_str));
                     break;
                 }
             }
@@ -310,17 +305,19 @@ pub fn parse_curlman_editor<'a>(
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum JsonToken {
-    ObjectBracket(String),
-    ArrayBracket(String),
-    NameSeparator(String),
-    ValueSeparator(String),
-    Literal(String),
-    String(String),
-    Whitespace(String),
+pub enum JsonToken<'editor_repr> {
+    ObjectBracket(&'editor_repr str),
+    ArrayBracket(&'editor_repr str),
+    NameSeparator(&'editor_repr str),
+    Identifier(&'editor_repr str),
+    ValueSeparator(&'editor_repr str),
+    Literal(&'editor_repr str),
+    String(&'editor_repr str),
+    Whitespace(&'editor_repr str),
+    Invalid(&'editor_repr str),
 }
 
-impl JsonToken {
+impl<'repr> JsonToken<'repr> {
     pub fn get_color(&self, colorscheme: &JsonOutputColorscheme) -> Color {
         match self {
             JsonToken::ObjectBracket(_) => colorscheme.object_bracket_color,
@@ -330,94 +327,147 @@ impl JsonToken {
             JsonToken::Literal(_) => colorscheme.literal_color,
             JsonToken::String(_) => colorscheme.string_color,
             JsonToken::Whitespace(_) => Color::White,
+            JsonToken::Invalid(_) => colorscheme.invalid_color,
+            JsonToken::Identifier(_) => colorscheme.string_color,
         }
     }
 }
 
-pub fn parse_json_value(input: &Value, indent_level: usize) -> Vec<Vec<JsonToken>> {
-    let mut lines = Vec::new();
+enum JsonParserState {
+    AwaitingValue,
+    AwatingNameSeparator,
+    AwaitingRecordSeparator,
+    AwaitingValueSeparator,
+    AwaitingName,
+}
 
-    match input {
-        Value::Object(map) => {
-            // First line: opening bracket
-            lines.push(vec![JsonToken::ObjectBracket("{".to_string())]);
-            // Process each key-value pair
-            for (i, (key, val)) in map.iter().enumerate() {
-                let mut line = Vec::new();
-                line.push(JsonToken::Whitespace(" ".repeat(indent_level + 1)));
-                line.push(JsonToken::String(format!("\"{}\"", key)));
-                line.push(JsonToken::NameSeparator(": ".to_string()));
-                let nested_lines = parse_json_value(val, indent_level + 1);
+struct JsonParser<'a> {
+    current_state: JsonParserState,
+    last_seen_token: Option<JsonToken<'a>>,
+}
 
-                line.extend(nested_lines[0].clone());
-                lines.push(line); // Add the current line to `lines`
-                                  // Append remaining lines of nested element, if any
-                for nested_line in nested_lines.into_iter().skip(1) {
-                    lines.push(nested_line);
+fn decimal(input: &str) -> IResult<&str, &str> {
+    recognize(many1(terminated(one_of("0123456789"), many0(char('_'))))).parse(input)
+}
+
+fn check_for_previous_token<'a>(current_token: &JsonToken<'a>, parser: &mut JsonParser) {
+    match parser.last_seen_token {
+        Some(ref previous_token) => match current_token {
+            JsonToken::Literal(_) | JsonToken::String(_) => match previous_token {
+                JsonToken::ArrayBracket(_) => {
+                    parser.current_state = JsonParserState::AwaitingValueSeparator;
                 }
-                // Add a comma at the end of the last line for this element, if needed
-                if i < map.len() - 1 {
-                    lines
-                        .last_mut()
-                        .unwrap()
-                        .push(JsonToken::ValueSeparator(",".to_string()));
-                }
+                _ => {}
+            },
+            _ => {}
+        },
+        None => {}
+    }
+}
+
+fn parse_json_editor_line<'a>(
+    input: &'a str,
+    parser: &mut JsonParser<'a>,
+) -> IResult<&'a str, Vec<JsonToken<'a>>> {
+    let mut tokens = Vec::new();
+    let ret = match parser.current_state {
+        JsonParserState::AwaitingValue => {
+            let (input, space) = multispace0(input)?;
+            if !space.is_empty() {
+                tokens.push(JsonToken::Whitespace(space));
+            }
+            let mut remaining_input = None;
+            //Object
+            if let Ok((remaining, object_open)) = tag::<_, _, Error<&str>>("{")(input) {
+                parser.current_state = JsonParserState::AwaitingName;
+                remaining_input = Some(remaining);
+                tokens.push(JsonToken::ObjectBracket(object_open));
+            }
+            //Array
+            if let Ok((remaining, array_open)) = tag::<_, _, Error<&str>>("[")(input) {
+                remaining_input = Some(remaining);
+                tokens.push(JsonToken::ArrayBracket(array_open));
+            }
+            //Null
+            if let Ok((remaining, null)) = tag::<_, _, Error<&str>>("null")(input) {
+                remaining_input = Some(remaining);
+                let token_to_push = JsonToken::Literal(null);
+                check_for_previous_token(&token_to_push, parser);
+                tokens.push(token_to_push);
+            }
+            //Booleans
+            if let Ok((remaining, boolean)) =
+                alt((tag::<_, _, Error<&str>>("false"), tag("true")))(input)
+            {
+                remaining_input = Some(remaining);
+                let token_to_push = JsonToken::Literal(boolean);
+                check_for_previous_token(&token_to_push, parser);
+                tokens.push(token_to_push);
+            }
+            //Numbers
+            if let Ok((remaining, number)) = alt((decimal, recognize_float))(input) {
+                remaining_input = Some(remaining);
+                let token_to_push = JsonToken::Literal(number);
+                check_for_previous_token(&token_to_push, parser);
+                tokens.push(token_to_push);
+            }
+            //Strings
+            if let Ok((remaining, string)) = string_parser(input) {
+                remaining_input = Some(remaining);
+                let token_to_push = JsonToken::Literal(string);
+                check_for_previous_token(&token_to_push, parser);
+                tokens.push(token_to_push);
+            }
+            match remaining_input {
+                Some(remaining) => Ok((remaining, tokens)),
+                None => Err(nom::Err::Failure(Error::new(
+                    "No valid value",
+                    ErrorKind::IsNot,
+                ))),
+            }
+        }
+        JsonParserState::AwatingNameSeparator => Ok(("", Vec::new())),
+        JsonParserState::AwaitingName => Ok(("", Vec::new())),
+        JsonParserState::AwaitingRecordSeparator => Ok(("", Vec::new())),
+        JsonParserState::AwaitingValueSeparator => {
+            let (input, space) = multispace0(input)?;
+
+            if !space.is_empty() {
+                tokens.push(JsonToken::Whitespace(space));
             }
 
-            // Last line: closing bracket
-            let mut closing_line = vec![JsonToken::Whitespace(" ".repeat(indent_level))];
-            closing_line.push(JsonToken::ObjectBracket("}".to_string()));
-            lines.push(closing_line);
-        }
-        Value::Array(arr) => {
-            // First line: opening bracket
-            lines.push(vec![JsonToken::ArrayBracket("[".to_string())]);
-
-            // Process each array element
-            for (i, val) in arr.iter().enumerate() {
-                let mut line = Vec::new();
-                line.push(JsonToken::Whitespace(" ".repeat(indent_level + 1)));
-
-                let nested_lines = parse_json_value(val, indent_level + 1);
-
-                // Add the first line of the nested element to the current line
-                line.extend(nested_lines[0].clone());
-                lines.push(line); // Add the current line to `lines`
-
-                // Append remaining lines of nested element, if any
-                for nested_line in nested_lines.into_iter().skip(1) {
-                    lines.push(nested_line);
+            match tag::<_, _, Error<&str>>("]")(input) {
+                Ok((remaining, array_close)) => {
+                    tokens.push(JsonToken::ArrayBracket(array_close));
+                    parser.current_state = JsonParserState::AwaitingRecordSeparator;
+                    Ok((remaining, tokens))
                 }
-
-                // Add a comma at the end of the last line for this element, if needed
-                if i < arr.len() - 1 {
-                    lines
-                        .last_mut()
-                        .unwrap()
-                        .push(JsonToken::ValueSeparator(",".to_string()));
+                Err(_) => {
+                    let (input, comma) = tag(",")(input)?;
+                    tokens.push(JsonToken::ValueSeparator(comma));
+                    parser.current_state = JsonParserState::AwaitingValue;
+                    Ok((input, tokens))
                 }
             }
-
-            // Last line: closing bracket
-            let mut closing_line = vec![JsonToken::Whitespace(" ".repeat(indent_level))];
-            closing_line.push(JsonToken::ArrayBracket("]".to_string()));
-            lines.push(closing_line);
         }
-        Value::String(s) => lines.push(vec![JsonToken::String(format!("\"{}\"", s))]),
-        Value::Number(n) => lines.push(vec![JsonToken::Literal(n.to_string())]),
-        Value::Bool(b) => lines.push(vec![JsonToken::Literal(b.to_string())]),
-        Value::Null => lines.push(vec![JsonToken::Literal("null".to_string())]),
+    };
+
+    if let Ok((_, ref tokens)) = ret {
+        parser.last_seen_token = tokens.last().cloned();
     }
 
-    lines
+    ret
+}
+
+pub fn parse_json_editor(input: &Vec<String>) -> Vec<Vec<JsonToken>> {
+    Vec::new()
 }
 
 #[cfg(test)]
 mod tests {
 
+    use crate::editor::colors::get_default_editor_colorscheme;
     use std::{collections::HashMap, time::Duration};
-
-    use crate::editor::colors::get_default_colorscheme;
 
     use super::*;
 
@@ -493,7 +543,7 @@ mod tests {
             String::from("-H \"Authorization"),
             String::from("-X POST"),
         ];
-        let colorscheme = get_default_colorscheme();
+        let colorscheme = get_default_editor_colorscheme();
         let res = parse_curlman_editor(&input, &colorscheme);
         assert!(!res.is_empty());
     }
@@ -578,35 +628,5 @@ mod tests {
                 body: None
             },]
         )
-    }
-
-    #[test]
-    fn test_json_parsing() {
-        let json_str = "{\"name\": \"Nestor\", \"age\": 30}";
-        let input: Value = serde_json::from_str(json_str).unwrap();
-        let lines = parse_json_value(&input, 0);
-        assert_eq!(
-            lines,
-            vec![
-                vec![JsonToken::ObjectBracket("{".to_string())],
-                vec![
-                    JsonToken::Whitespace(" ".to_string()),
-                    JsonToken::String("\"age\"".to_string()),
-                    JsonToken::NameSeparator(": ".to_string()),
-                    JsonToken::Literal("30".to_string()),
-                    JsonToken::ValueSeparator(",".to_string()),
-                ],
-                vec![
-                    JsonToken::Whitespace(" ".to_string()),
-                    JsonToken::String("\"name\"".to_string()),
-                    JsonToken::NameSeparator(": ".to_string()),
-                    JsonToken::String("\"Nestor\"".to_string()),
-                ],
-                vec![
-                    JsonToken::Whitespace("".to_string()),
-                    JsonToken::ObjectBracket("}".to_string()),
-                ],
-            ]
-        );
     }
 }

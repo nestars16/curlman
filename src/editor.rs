@@ -3,7 +3,7 @@
 //timeout for motions?
 
 use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
-use colors::{get_default_colorscheme, EditorColorscheme};
+use colors::{get_default_editor_colorscheme, EditorColorscheme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -234,10 +234,11 @@ pub mod colors {
         pub name_separator_color: Color,
         pub value_separator_color: Color,
         pub literal_color: Color,
+        pub invalid_color: Color,
         pub string_color: Color,
     }
 
-    pub fn get_default_colorscheme() -> EditorColorscheme {
+    pub fn get_default_editor_colorscheme() -> EditorColorscheme {
         EditorColorscheme {
             curl_color: Color::Cyan,
             url_color: Color::Yellow,
@@ -256,6 +257,7 @@ pub mod colors {
             value_separator_color: Color::White,
             literal_color: Color::Green,
             string_color: Color::Blue,
+            invalid_color: Color::White,
         }
     }
 }
@@ -431,7 +433,7 @@ impl<'editor> Editor<'editor> {
             col: 0,
             row: 0,
             lines: start_state,
-            colorscheme: get_default_colorscheme(),
+            colorscheme: get_default_editor_colorscheme(),
             top_row: 0,
             editor_height: AtomicU16::new(0),
         }
@@ -459,13 +461,15 @@ impl<'editor> Editor<'editor> {
                 let cursor_has_to_be_set =
                     !is_cursor_set && row_idx == self.row && line_token_end >= self.col;
 
+                let color = line_token.get_color(&self.colorscheme);
+
                 match line_token {
-                    crate::parser::Token::Curl(text, color)
-                    | crate::parser::Token::Url(text, color)
-                    | crate::parser::Token::ParamKey(text, color)
-                    | crate::parser::Token::ParamValue(text, color)
-                    | crate::parser::Token::Unknown(text, color)
-                    | crate::parser::Token::Separator(text, color) => {
+                    crate::parser::Token::Curl(text)
+                    | crate::parser::Token::Url(text)
+                    | crate::parser::Token::ParamKey(text)
+                    | crate::parser::Token::ParamValue(text)
+                    | crate::parser::Token::Unknown(text)
+                    | crate::parser::Token::Separator(text) => {
                         widget_common::fit_tokens_into_editor_window(
                             self.col,
                             text,
