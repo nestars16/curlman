@@ -1,9 +1,13 @@
 use std::{collections::HashMap, io::Read, sync::atomic::AtomicU16};
 
 use crate::{
-    editor::{self, CurlmanWidget, InputListener, WidgetCommand},
+    editor::{
+        self,
+        colors::{get_default_output_colorscheme, JsonOutputColorscheme},
+        CurlmanWidget, InputListener, WidgetCommand,
+    },
     error::Error,
-    keys,
+    parser::{parse_json_value, JsonToken},
     types::RequestInfo,
     AppState,
 };
@@ -14,21 +18,23 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Style, Stylize},
-    text::{Line, Text},
+    text::Text,
     widgets::{Block, StatefulWidgetRef, Widget},
 };
+use serde_json::Value;
 
-trait RequestOutputFormatter {
-    fn format(&mut self, input: &[u8]) -> Vec<Line>;
+#[derive(Debug)]
+enum FormatterError {
+    InvalidInput,
 }
 
 pub struct RequestExecutor {
     block: Block<'static>,
     selected: bool,
-    col: usize,
     row: usize,
-    top_col: AtomicU16,
-    formatter: Option<Box<dyn RequestOutputFormatter>>,
+    top_row: u16,
+    executor_height: AtomicU16,
+    json_formatter: JsonFormatter,
     handle: Easy,
     output_data: Vec<u8>,
     headers: HashMap<HeaderName, String>,
@@ -42,12 +48,14 @@ impl RequestExecutor {
             selected: false,
             output_data: Vec::new(),
             request: None,
-            col: 0,
             row: 0,
-            top_col: AtomicU16::new(0),
+            top_row: 0,
+            executor_height: AtomicU16::new(0),
             headers: HashMap::new(),
             handle: Easy::new(),
-            formatter: None,
+            json_formatter: JsonFormatter {
+                colorscheme: get_default_output_colorscheme(),
+            },
         }
     }
 
@@ -81,8 +89,8 @@ impl RequestExecutor {
                             let Ok(header_name) = header_name_parse_res else {
                                 break 'some_block;
                             };
+
                             self.headers.insert(header_name, header_value.to_string());
-                            eprintln!("{:?}", self.headers);
                         }
                         None => {}
                     };
@@ -111,8 +119,10 @@ impl RequestExecutor {
                             let Ok(header_name) = header_name_parse_res else {
                                 break 'some_block;
                             };
+
                             self.headers.insert(header_name, header_value.to_string());
                         }
+
                         None => {}
                     };
                     true
@@ -136,7 +146,44 @@ impl RequestExecutor {
         }
     }
 
-    pub fn get_formatted_output() {}
+    pub fn fit_json_parser_output(&self, tokenized_lines: Vec<Vec<JsonToken>>, area: Rect) -> Text {
+        let mut spans = Vec::new();
+        let mut lines = Vec::new();
+
+        for (row_idx, line) in tokenized_lines.into_iter().enumerate() {
+            if row_idx < self.top_row as usize
+                || row_idx >= self.top_row as usize + area.height as usize
+            {
+                continue;
+            }
+
+            let mut current_col = 0;
+            for token in line {
+                let color = token.get_color(&self.json_formatter.colorscheme);
+                let mut is_cursor_set = true;
+                match token {
+                    JsonToken::ObjectBracket(text)
+                    | JsonToken::ArrayBracket(text)
+                    | JsonToken::NameSeparator(text)
+                    | JsonToken::ValueSeparator(text)
+                    | JsonToken::Literal(text)
+                    | JsonToken::String(text)
+                    | JsonToken::Whitespace(text) => {}
+                }
+            }
+        }
+
+        Text::from(lines)
+    }
+
+    pub fn get_executor_output(&self, area: Rect) -> Text {
+        match self.headers.get(&http::header::CONTENT_TYPE) {
+            Some(content_type) => match content_type.as_str() {
+                _ => Text::from(String::from_utf8(self.output_data.clone()).unwrap()),
+            },
+            None => Text::from(String::from_utf8(self.output_data.clone()).unwrap()),
+        }
+    }
 }
 
 impl StatefulWidgetRef for RequestExecutor {
@@ -149,11 +196,8 @@ impl StatefulWidgetRef for RequestExecutor {
     #[doc = " to implement a custom stateful widget."]
     fn render_ref(&self, area: Rect, buf: &mut Buffer, _: &mut Self::State) {
         let text_area = self.block.inner(area);
-
-        let inner = Text::from(String::from_utf8(self.output_data.clone()).unwrap());
-
+        let inner = self.get_executor_output(area);
         self.block.clone().render(area, buf);
-
         inner.render(text_area, buf);
     }
 }
@@ -209,5 +253,20 @@ impl CurlmanWidget for RequestExecutor {
             self.request = new_state.requests.iter().nth(idx).cloned();
         }
         Ok(())
+    }
+}
+
+struct JsonFormatter {
+    pub colorscheme: JsonOutputColorscheme,
+}
+
+impl JsonFormatter {
+    fn format(&self, input: &[u8]) -> Result<Vec<Vec<JsonToken>>, FormatterError> {
+        let json_value: Value =
+            serde_json::from_slice(input).map_err(|_| FormatterError::InvalidInput)?;
+
+        let formatted = parse_json_value(&json_value, 0);
+
+        Ok(formatted)
     }
 }

@@ -3,7 +3,7 @@
 //timeout for motions?
 
 use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
-use colors::{get_default_colorscheme, Colorscheme};
+use colors::{get_default_colorscheme, EditorColorscheme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -16,6 +16,7 @@ use ratatui::{
 use std::sync::atomic::AtomicU16;
 
 pub mod widget_common {
+
     use ratatui::{
         layout::Rect,
         style::Color,
@@ -106,7 +107,6 @@ pub mod widget_common {
         }
     }
 
-    #[inline]
     pub fn fit_tokens_into_editor_window<'widget>(
         editor_col: usize,
         text: &'widget str,
@@ -197,8 +197,6 @@ pub mod widget_common {
                             }
                         };
                         let mut after_cursor = &containing_and_after_cursor[1..];
-                        dbg!(after_cursor);
-                        dbg!(remaining_space_in_line);
                         while after_cursor.len() > remaining_space_in_line {
                             spans.push(
                                 Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
@@ -221,7 +219,7 @@ pub mod widget_common {
 pub mod colors {
     use ratatui::style::Color;
 
-    pub struct Colorscheme {
+    pub struct EditorColorscheme {
         pub curl_color: Color,
         pub url_color: Color,
         pub param_key_color: Color,
@@ -230,14 +228,34 @@ pub mod colors {
         pub unknown_color: Color,
     }
 
-    pub fn get_default_colorscheme() -> Colorscheme {
-        Colorscheme {
+    pub struct JsonOutputColorscheme {
+        pub object_bracket_color: Color,
+        pub array_bracket_color: Color,
+        pub name_separator_color: Color,
+        pub value_separator_color: Color,
+        pub literal_color: Color,
+        pub string_color: Color,
+    }
+
+    pub fn get_default_colorscheme() -> EditorColorscheme {
+        EditorColorscheme {
             curl_color: Color::Cyan,
             url_color: Color::Yellow,
             param_key_color: Color::Green,
             param_value_color: Color::Blue,
             separator_color: Color::White,
             unknown_color: Color::White,
+        }
+    }
+
+    pub fn get_default_output_colorscheme() -> JsonOutputColorscheme {
+        JsonOutputColorscheme {
+            object_bracket_color: Color::White,
+            array_bracket_color: Color::White,
+            name_separator_color: Color::White,
+            value_separator_color: Color::White,
+            literal_color: Color::Green,
+            string_color: Color::Blue,
         }
     }
 }
@@ -388,7 +406,7 @@ pub struct Editor<'editor> {
     top_row: u16,
     editor_height: AtomicU16,
     pub lines: Vec<String>,
-    colorscheme: Colorscheme,
+    colorscheme: EditorColorscheme,
     block: Block<'editor>,
     tab_len: u8,
     current_mode: EditorMode,

@@ -1,12 +1,12 @@
 use http::Method;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, is_not, tag, take, take_till, take_till1, take_while, take_while1},
+    bytes::complete::{escaped, tag, take, take_till, take_while, take_while1},
     character::complete::{char, multispace0, multispace1, none_of},
     combinator::recognize,
     error::{Error, ErrorKind},
     multi::separated_list0,
-    sequence::{delimited, pair, preceded, separated_pair, tuple},
+    sequence::{delimited, pair, separated_pair, tuple},
     IResult,
 };
 
@@ -15,11 +15,15 @@ use nom::{
 //consider basic auth?
 //file uploads?
 
-use ratatui::style::Color;
-use url::{self, Url};
+use ratatui::{
+    style::{Color, Stylize},
+    text::Span,
+};
+use serde_json::Value;
+use url::{self, form_urlencoded::parse, Url};
 
 use crate::{
-    editor::colors::Colorscheme,
+    editor::colors::{EditorColorscheme, JsonOutputColorscheme},
     types::{BodyType, CurlmanRequestParamType, RequestInfo},
 };
 
@@ -77,6 +81,7 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo> {
         separated_pair(param_parser, multispace1, alt((string_parser, tag_parser))),
     )(input)?;
     let mut request_info = RequestInfo::default();
+
     for (param_type, value) in params {
         let param_type_res: Result<CurlmanRequestParamType, _> = param_type.parse();
         let Ok(param_type) = param_type_res else {
@@ -153,7 +158,7 @@ pub fn parse_curlman_request_file(input: &str) -> IResult<&str, Vec<RequestInfo>
 }
 
 #[derive(Debug)]
-enum ParserState {
+enum RequestParserState {
     ExpectingCurl,
     ExpectingUrl,
     ExpectingParamKey,
@@ -162,13 +167,13 @@ enum ParserState {
 
 fn parse_curlman_editor_line<'a, 'b>(
     input: &'a str,
-    parser_state: &'b mut ParserState,
-    colorscheme: &Colorscheme,
+    parser_state: &'b mut RequestParserState,
+    colorscheme: &EditorColorscheme,
 ) -> IResult<&'a str, Vec<Token<'a>>> {
     let mut line_tokens = Vec::new();
 
     match parser_state {
-        ParserState::ExpectingCurl => {
+        RequestParserState::ExpectingCurl => {
             let (input, space) = multispace0(input)?;
 
             if !space.is_empty() {
@@ -184,11 +189,11 @@ fn parse_curlman_editor_line<'a, 'b>(
                 line_tokens.push(Token::Whitespace(space));
             }
 
-            *parser_state = ParserState::ExpectingUrl;
+            *parser_state = RequestParserState::ExpectingUrl;
             return Ok((input, line_tokens));
         }
 
-        ParserState::ExpectingUrl => {
+        RequestParserState::ExpectingUrl => {
             let (input, space) = multispace0(input)?;
 
             if !space.is_empty() {
@@ -207,11 +212,11 @@ fn parse_curlman_editor_line<'a, 'b>(
             if !space.is_empty() {
                 line_tokens.push(Token::Whitespace(space));
             }
-            *parser_state = ParserState::ExpectingParamKey;
+            *parser_state = RequestParserState::ExpectingParamKey;
 
             return Ok((input, line_tokens));
         }
-        ParserState::ExpectingParamKey => {
+        RequestParserState::ExpectingParamKey => {
             let (input, space) = multispace0(input)?;
 
             if !space.is_empty() {
@@ -222,7 +227,7 @@ fn parse_curlman_editor_line<'a, 'b>(
 
             match separator_res {
                 Ok((input, separator)) => {
-                    *parser_state = ParserState::ExpectingCurl;
+                    *parser_state = RequestParserState::ExpectingCurl;
                     line_tokens.push(Token::Separator(separator, colorscheme.separator_color));
                     return Ok((input, line_tokens));
                 }
@@ -243,10 +248,10 @@ fn parse_curlman_editor_line<'a, 'b>(
                 line_tokens.push(Token::Whitespace(space));
             }
 
-            *parser_state = ParserState::ExpectingParamValue;
+            *parser_state = RequestParserState::ExpectingParamValue;
             return Ok((input, line_tokens));
         }
-        ParserState::ExpectingParamValue => {
+        RequestParserState::ExpectingParamValue => {
             let (input, space) = multispace0(input)?;
             if !space.is_empty() {
                 line_tokens.push(Token::Whitespace(space));
@@ -269,7 +274,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                 colorscheme.param_value_color,
             ));
 
-            *parser_state = ParserState::ExpectingParamKey;
+            *parser_state = RequestParserState::ExpectingParamKey;
 
             return Ok((input, line_tokens));
         }
@@ -278,11 +283,11 @@ fn parse_curlman_editor_line<'a, 'b>(
 
 pub fn parse_curlman_editor<'a>(
     input: &'a Vec<String>,
-    colorscheme: &'a Colorscheme,
+    colorscheme: &'a EditorColorscheme,
 ) -> Vec<Vec<Token<'a>>> {
     let mut editor_tokens = Vec::new();
     let mut line_tokens = Vec::new();
-    let mut parser_state = ParserState::ExpectingCurl;
+    let mut parser_state = RequestParserState::ExpectingCurl;
 
     for line in input {
         let mut curr_str: &str = line;
@@ -302,6 +307,109 @@ pub fn parse_curlman_editor<'a>(
     }
 
     editor_tokens
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonToken {
+    ObjectBracket(String),
+    ArrayBracket(String),
+    NameSeparator(String),
+    ValueSeparator(String),
+    Literal(String),
+    String(String),
+    Whitespace(String),
+}
+
+impl JsonToken {
+    pub fn get_color(&self, colorscheme: &JsonOutputColorscheme) -> Color {
+        match self {
+            JsonToken::ObjectBracket(_) => colorscheme.object_bracket_color,
+            JsonToken::ArrayBracket(_) => colorscheme.array_bracket_color,
+            JsonToken::NameSeparator(_) => colorscheme.name_separator_color,
+            JsonToken::ValueSeparator(_) => colorscheme.value_separator_color,
+            JsonToken::Literal(_) => colorscheme.literal_color,
+            JsonToken::String(_) => colorscheme.string_color,
+            JsonToken::Whitespace(_) => Color::White,
+        }
+    }
+}
+
+pub fn parse_json_value(input: &Value, indent_level: usize) -> Vec<Vec<JsonToken>> {
+    let mut lines = Vec::new();
+
+    match input {
+        Value::Object(map) => {
+            // First line: opening bracket
+            lines.push(vec![JsonToken::ObjectBracket("{".to_string())]);
+            // Process each key-value pair
+            for (i, (key, val)) in map.iter().enumerate() {
+                let mut line = Vec::new();
+                line.push(JsonToken::Whitespace(" ".repeat(indent_level + 1)));
+                line.push(JsonToken::String(format!("\"{}\"", key)));
+                line.push(JsonToken::NameSeparator(": ".to_string()));
+                let nested_lines = parse_json_value(val, indent_level + 1);
+
+                line.extend(nested_lines[0].clone());
+                lines.push(line); // Add the current line to `lines`
+                                  // Append remaining lines of nested element, if any
+                for nested_line in nested_lines.into_iter().skip(1) {
+                    lines.push(nested_line);
+                }
+                // Add a comma at the end of the last line for this element, if needed
+                if i < map.len() - 1 {
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push(JsonToken::ValueSeparator(",".to_string()));
+                }
+            }
+
+            // Last line: closing bracket
+            let mut closing_line = vec![JsonToken::Whitespace(" ".repeat(indent_level))];
+            closing_line.push(JsonToken::ObjectBracket("}".to_string()));
+            lines.push(closing_line);
+        }
+        Value::Array(arr) => {
+            // First line: opening bracket
+            lines.push(vec![JsonToken::ArrayBracket("[".to_string())]);
+
+            // Process each array element
+            for (i, val) in arr.iter().enumerate() {
+                let mut line = Vec::new();
+                line.push(JsonToken::Whitespace(" ".repeat(indent_level + 1)));
+
+                let nested_lines = parse_json_value(val, indent_level + 1);
+
+                // Add the first line of the nested element to the current line
+                line.extend(nested_lines[0].clone());
+                lines.push(line); // Add the current line to `lines`
+
+                // Append remaining lines of nested element, if any
+                for nested_line in nested_lines.into_iter().skip(1) {
+                    lines.push(nested_line);
+                }
+
+                // Add a comma at the end of the last line for this element, if needed
+                if i < arr.len() - 1 {
+                    lines
+                        .last_mut()
+                        .unwrap()
+                        .push(JsonToken::ValueSeparator(",".to_string()));
+                }
+            }
+
+            // Last line: closing bracket
+            let mut closing_line = vec![JsonToken::Whitespace(" ".repeat(indent_level))];
+            closing_line.push(JsonToken::ArrayBracket("]".to_string()));
+            lines.push(closing_line);
+        }
+        Value::String(s) => lines.push(vec![JsonToken::String(format!("\"{}\"", s))]),
+        Value::Number(n) => lines.push(vec![JsonToken::Literal(n.to_string())]),
+        Value::Bool(b) => lines.push(vec![JsonToken::Literal(b.to_string())]),
+        Value::Null => lines.push(vec![JsonToken::Literal("null".to_string())]),
+    }
+
+    lines
 }
 
 #[cfg(test)]
@@ -470,5 +578,35 @@ mod tests {
                 body: None
             },]
         )
+    }
+
+    #[test]
+    fn test_json_parsing() {
+        let json_str = "{\"name\": \"Nestor\", \"age\": 30}";
+        let input: Value = serde_json::from_str(json_str).unwrap();
+        let lines = parse_json_value(&input, 0);
+        assert_eq!(
+            lines,
+            vec![
+                vec![JsonToken::ObjectBracket("{".to_string())],
+                vec![
+                    JsonToken::Whitespace(" ".to_string()),
+                    JsonToken::String("\"age\"".to_string()),
+                    JsonToken::NameSeparator(": ".to_string()),
+                    JsonToken::Literal("30".to_string()),
+                    JsonToken::ValueSeparator(",".to_string()),
+                ],
+                vec![
+                    JsonToken::Whitespace(" ".to_string()),
+                    JsonToken::String("\"name\"".to_string()),
+                    JsonToken::NameSeparator(": ".to_string()),
+                    JsonToken::String("\"Nestor\"".to_string()),
+                ],
+                vec![
+                    JsonToken::Whitespace("".to_string()),
+                    JsonToken::ObjectBracket("}".to_string()),
+                ],
+            ]
+        );
     }
 }
