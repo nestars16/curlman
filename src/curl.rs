@@ -1,18 +1,20 @@
+use ratatui::widgets::WidgetRef;
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
     io::Read,
-    sync::atomic::AtomicU16,
+    sync::atomic::{AtomicU16, Ordering},
 };
 
 use crate::{
     editor::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
+        widget_common::fit_tokens_into_editor_window,
         CurlmanWidget, InputListener, WidgetCommand,
     },
     error::Error,
-    parser::JsonToken,
+    parser::{parse_json_editor, JsonToken},
     types::RequestInfo,
     AppState,
 };
@@ -28,7 +30,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Style, Stylize},
-    text::{Span, Text},
+    text::Text,
     widgets::{Block, StatefulWidgetRef, Widget},
 };
 
@@ -41,8 +43,10 @@ pub struct RequestExecutor {
     block: Block<'static>,
     selected: bool,
     row: usize,
+    col: usize,
     top_row: u16,
     executor_height: AtomicU16,
+    executor_width: AtomicU16,
     json_formatter: JsonFormatter,
     handle: Easy,
     output_data: Vec<u8>,
@@ -67,6 +71,8 @@ impl RequestExecutor {
                 colorscheme: get_default_output_colorscheme(),
             },
             editor_representation: Vec::new(),
+            executor_width: AtomicU16::new(0),
+            col: 0,
         }
     }
 
@@ -157,43 +163,8 @@ impl RequestExecutor {
         }
     }
 
-    pub fn fit_json_parser_output(&self, tokenized_lines: Vec<Vec<JsonToken>>, area: Rect) -> Text {
-        let mut spans: Vec<Span> = Vec::new();
-
-        let mut lines = Vec::new();
-        for (row_idx, line) in tokenized_lines.into_iter().enumerate() {
-            if row_idx < self.top_row as usize
-                || row_idx >= self.top_row as usize + area.height as usize
-            {
-                continue;
-            }
-            let mut current_col = 0;
-            for token in line {
-                let color = token.get_color(&self.json_formatter.colorscheme);
-                let mut is_cursor_set = true;
-                match token {
-                    JsonToken::ObjectBracket(text)
-                    | JsonToken::ArrayBracket(text)
-                    | JsonToken::NameSeparator(text)
-                    | JsonToken::ValueSeparator(text)
-                    | JsonToken::Literal(text)
-                    | JsonToken::String(text)
-                    | JsonToken::Whitespace(text)
-                    | JsonToken::Identifier(text)
-                    | JsonToken::Invalid(text) => {}
-                }
-            }
-        }
-        Text::from(lines)
-    }
-
     pub fn get_executor_output(&self, area: Rect) -> Text {
-        match self.headers.get(&http::header::CONTENT_TYPE) {
-            Some(content_type) => match content_type.as_str() {
-                _ => Text::from(String::from_utf8(self.output_data.clone()).unwrap()),
-            },
-            None => Text::from(String::from_utf8(self.output_data.clone()).unwrap()),
-        }
+        Text::from("")
     }
 }
 
@@ -206,10 +177,36 @@ impl StatefulWidgetRef for RequestExecutor {
     #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
     #[doc = " to implement a custom stateful widget."]
     fn render_ref(&self, area: Rect, buf: &mut Buffer, _: &mut Self::State) {
+        self.executor_width.store(area.width, Ordering::Relaxed);
+        self.executor_height.store(area.height, Ordering::Relaxed);
         let text_area = self.block.inner(area);
-        let inner = self.get_executor_output(area);
         self.block.clone().render(area, buf);
-        inner.render(text_area, buf);
+
+        match self.editor_representation.is_empty() {
+            true => {
+                Text::from(String::from_utf8_lossy(&self.output_data)).render(text_area, buf);
+            }
+            false => match self.headers.get(&http::header::CONTENT_TYPE) {
+                Some(content_type) => match content_type.as_str() {
+                    "application/json" => {
+                        Text::from(self.json_formatter.format_lines_into_text(
+                            &self.editor_representation,
+                            area.width,
+                            self.col,
+                        ))
+                        .render(text_area, buf);
+                    }
+                    _ => {
+                        let editor = self.editor_representation.join("\n");
+                        Text::from(editor).render(text_area, buf);
+                    }
+                },
+                None => {
+                    let editor = self.editor_representation.join("\n");
+                    Text::from(editor).render(text_area, buf);
+                }
+            },
+        }
     }
 }
 
@@ -233,7 +230,21 @@ impl InputListener for RequestExecutor {
                         match self.perform_request() {
                             Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
                                 Some(content_type) => match content_type.as_str() {
-                                    "application/json" => {}
+                                    s if s.contains("application/json") => {
+                                        let json_lines_res = self
+                                            .json_formatter
+                                            .format_output_data_into_lines(&self.output_data);
+
+                                        match json_lines_res {
+                                            Ok(lines) => {
+                                                self.editor_representation = lines;
+                                            }
+                                            Err(e) => {
+                                                self.output_data =
+                                                    format!("An error ocurred : {:?}", e).into()
+                                            }
+                                        }
+                                    }
                                     _ => {}
                                 },
                                 None => {}
@@ -307,11 +318,55 @@ impl JsonFormatter {
         unsafe { jv_free(dump_string) };
         Ok(jv_output_string.split('\n').map(|l| l.to_owned()).collect())
     }
+
+    pub fn format_lines_into_text<'a>(
+        &self,
+        lines: &'a Vec<String>,
+        area_width: u16,
+        editor_col: usize,
+    ) -> Text<'a> {
+        let tokenized_lines = parse_json_editor(lines);
+        panic!("{:?}", tokenized_lines);
+
+        let mut lines = Vec::new();
+        let mut spans = Vec::new();
+
+        let mut is_cursor_set = true;
+        for line in tokenized_lines {
+            let mut current_col = 0;
+            for token in line {
+                let color = token.get_color(&self.colorscheme);
+                match token {
+                    JsonToken::ObjectBracket(text)
+                    | JsonToken::ArrayBracket(text)
+                    | JsonToken::KeySeparator(text)
+                    | JsonToken::Identifier(text)
+                    | JsonToken::ValueSeparator(text)
+                    | JsonToken::Literal(text)
+                    | JsonToken::String(text)
+                    | JsonToken::Whitespace(text)
+                    | JsonToken::Invalid(text) => fit_tokens_into_editor_window(
+                        editor_col,
+                        text,
+                        color,
+                        area_width,
+                        false,
+                        &mut is_cursor_set,
+                        &mut current_col,
+                        &mut lines,
+                        &mut spans,
+                    ),
+                }
+            }
+        }
+
+        Text::from(lines)
+    }
 }
 
 mod tests {
     use super::JsonFormatter;
-    use crate::editor::colors::get_default_output_colorscheme;
+    use crate::{editor::colors::get_default_output_colorscheme, parser::parse_json_editor};
     use jq_sys::{jq_init, jq_teardown};
 
     #[test]
@@ -341,5 +396,30 @@ mod tests {
                 "}".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_formatting_lines_into_text() {
+        let mut jq_state = unsafe { jq_init() };
+
+        if jq_state.is_null() {
+            panic!("Couldn't initialize jq");
+        }
+
+        let formatter = JsonFormatter {
+            colorscheme: get_default_output_colorscheme(),
+        };
+
+        let input = vec![
+            "{".to_string(),
+            "  \"name\": \"John\",".to_string(),
+            "  \"age\": 30".to_string(),
+            "}".to_string(),
+        ];
+
+        let result = parse_json_editor(&input);
+
+        dbg!(result);
+        unsafe { jq_teardown(&mut jq_state) };
     }
 }

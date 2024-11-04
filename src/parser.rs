@@ -3,12 +3,12 @@ use nom::{
     branch::alt,
     bytes::complete::{escaped, tag, take, take_till, take_while, take_while1},
     character::complete::{char, multispace0, multispace1, none_of, one_of},
-    combinator::recognize,
+    combinator::{map, recognize},
     error::{Error, ErrorKind},
-    multi::{many0, many1, separated_list0},
-    number::complete::{float, recognize_float},
-    sequence::{delimited, pair, separated_pair, terminated, tuple},
-    IResult, Parser,
+    multi::{many1, separated_list0},
+    number::complete::recognize_float,
+    sequence::{delimited, pair, separated_pair, tuple},
+    IResult,
 };
 
 //TODO?
@@ -24,12 +24,21 @@ use crate::{
     types::{BodyType, CurlmanRequestParamType, RequestInfo},
 };
 
-fn string_parser(input: &str) -> IResult<&str, &str> {
-    recognize(tuple((
-        tag("\""),
+fn string_parser_global(input: &str) -> IResult<&str, &str> {
+    let double_quoted = tuple((
+        tag::<_, _, Error<&str>>("\""),
         escaped(none_of("\\\""), '\\', take(1usize)),
         tag("\""),
-    )))(input)
+    ));
+
+    let single_quoted = tuple((
+        tag::<_, _, Error<&str>>("\'"),
+        escaped(none_of("\\\'"), '\\', take(1usize)),
+        tag("\'"),
+    ));
+
+    let mut string_parser = recognize(alt((double_quoted, single_quoted)));
+    string_parser(input)
 }
 
 #[derive(Debug)]
@@ -85,6 +94,7 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo> {
         multispace1,
         separated_pair(param_parser, multispace1, alt((string_parser, tag_parser))),
     )(input)?;
+
     let mut request_info = RequestInfo::default();
 
     for (param_type, value) in params {
@@ -263,7 +273,7 @@ fn parse_curlman_editor_line<'a, 'b>(
 
             let tag_parser = take_while1(|ch: char| ch.is_ascii_alphanumeric());
 
-            let mut param_value_parser = alt((string_parser, tag_parser));
+            let mut param_value_parser = alt((string_parser_global, tag_parser));
 
             let (input, param_value) = param_value_parser(input)?;
 
@@ -308,7 +318,7 @@ pub fn parse_curlman_editor<'a>(
 pub enum JsonToken<'editor_repr> {
     ObjectBracket(&'editor_repr str),
     ArrayBracket(&'editor_repr str),
-    NameSeparator(&'editor_repr str),
+    KeySeparator(&'editor_repr str),
     Identifier(&'editor_repr str),
     ValueSeparator(&'editor_repr str),
     Literal(&'editor_repr str),
@@ -322,7 +332,7 @@ impl<'repr> JsonToken<'repr> {
         match self {
             JsonToken::ObjectBracket(_) => colorscheme.object_bracket_color,
             JsonToken::ArrayBracket(_) => colorscheme.array_bracket_color,
-            JsonToken::NameSeparator(_) => colorscheme.name_separator_color,
+            JsonToken::KeySeparator(_) => colorscheme.name_separator_color,
             JsonToken::ValueSeparator(_) => colorscheme.value_separator_color,
             JsonToken::Literal(_) => colorscheme.literal_color,
             JsonToken::String(_) => colorscheme.string_color,
@@ -335,132 +345,208 @@ impl<'repr> JsonToken<'repr> {
 
 enum JsonParserState {
     AwaitingValue,
-    AwatingNameSeparator,
-    AwaitingRecordSeparator,
-    AwaitingValueSeparator,
-    AwaitingName,
+    AwaitingValueOrEnd,
+    AwaitingValueSeparatorOrEnd,
+    AwaitingKeyOrEnd,
+    AwaitingKeySeparator,
+    AwaitingRecordSeparatorOrEnd,
+    Done,
 }
 
-struct JsonParser<'a> {
+#[derive(PartialEq, Debug)]
+enum JsonContext {
+    Array,
+    Object,
+}
+
+struct JsonParser {
     current_state: JsonParserState,
-    last_seen_token: Option<JsonToken<'a>>,
+    context_stack: Vec<JsonContext>,
 }
 
 fn decimal(input: &str) -> IResult<&str, &str> {
-    recognize(many1(terminated(one_of("0123456789"), many0(char('_'))))).parse(input)
-}
-
-fn check_for_previous_token<'a>(current_token: &JsonToken<'a>, parser: &mut JsonParser) {
-    match parser.last_seen_token {
-        Some(ref previous_token) => match current_token {
-            JsonToken::Literal(_) | JsonToken::String(_) => match previous_token {
-                JsonToken::ArrayBracket(_) => {
-                    parser.current_state = JsonParserState::AwaitingValueSeparator;
-                }
-                _ => {}
-            },
-            _ => {}
-        },
-        None => {}
-    }
+    recognize(many1(one_of("0123456789")))(input)
 }
 
 fn parse_json_editor_line<'a>(
     input: &'a str,
-    parser: &mut JsonParser<'a>,
+    parser: &mut JsonParser,
 ) -> IResult<&'a str, Vec<JsonToken<'a>>> {
     let mut tokens = Vec::new();
+
+    let (input, space) = multispace0(input)?;
+
+    if !space.is_empty() {
+        tokens.push(JsonToken::Whitespace(space));
+    }
+
     let ret = match parser.current_state {
         JsonParserState::AwaitingValue => {
-            let (input, space) = multispace0(input)?;
-            if !space.is_empty() {
-                tokens.push(JsonToken::Whitespace(space));
+            let (remaining, token) = alt((
+                map(tag("{"), |s| JsonToken::ObjectBracket(s)),
+                map(tag("["), |s| JsonToken::ArrayBracket(s)),
+                map(tag("null"), |s| JsonToken::Literal(s)),
+                map(alt((tag("false"), tag("true"))), |s| JsonToken::Literal(s)),
+                map(alt((decimal, recognize_float)), |s| JsonToken::Literal(s)),
+                map(string_parser_global, |s| JsonToken::String(s)),
+            ))(input)?;
+
+            match token {
+                JsonToken::ObjectBracket(_) => {
+                    parser.context_stack.push(JsonContext::Object);
+                    parser.current_state = JsonParserState::AwaitingKeyOrEnd;
+                }
+                JsonToken::ArrayBracket(_) => {
+                    parser.context_stack.push(JsonContext::Array);
+                    parser.current_state = JsonParserState::AwaitingValueOrEnd;
+                }
+                _ => match parser.context_stack.last() {
+                    Some(JsonContext::Object) => {
+                        parser.current_state = JsonParserState::AwaitingRecordSeparatorOrEnd;
+                    }
+                    Some(JsonContext::Array) => {
+                        parser.current_state = JsonParserState::AwaitingValueOrEnd;
+                    }
+                    None => {
+                        parser.current_state = JsonParserState::Done;
+                    }
+                },
             }
-            let mut remaining_input = None;
-            //Object
-            if let Ok((remaining, object_open)) = tag::<_, _, Error<&str>>("{")(input) {
-                parser.current_state = JsonParserState::AwaitingName;
-                remaining_input = Some(remaining);
-                tokens.push(JsonToken::ObjectBracket(object_open));
-            }
-            //Array
-            if let Ok((remaining, array_open)) = tag::<_, _, Error<&str>>("[")(input) {
-                remaining_input = Some(remaining);
-                tokens.push(JsonToken::ArrayBracket(array_open));
-            }
-            //Null
-            if let Ok((remaining, null)) = tag::<_, _, Error<&str>>("null")(input) {
-                remaining_input = Some(remaining);
-                let token_to_push = JsonToken::Literal(null);
-                check_for_previous_token(&token_to_push, parser);
-                tokens.push(token_to_push);
-            }
-            //Booleans
-            if let Ok((remaining, boolean)) =
-                alt((tag::<_, _, Error<&str>>("false"), tag("true")))(input)
-            {
-                remaining_input = Some(remaining);
-                let token_to_push = JsonToken::Literal(boolean);
-                check_for_previous_token(&token_to_push, parser);
-                tokens.push(token_to_push);
-            }
-            //Numbers
-            if let Ok((remaining, number)) = alt((decimal, recognize_float))(input) {
-                remaining_input = Some(remaining);
-                let token_to_push = JsonToken::Literal(number);
-                check_for_previous_token(&token_to_push, parser);
-                tokens.push(token_to_push);
-            }
-            //Strings
-            if let Ok((remaining, string)) = string_parser(input) {
-                remaining_input = Some(remaining);
-                let token_to_push = JsonToken::Literal(string);
-                check_for_previous_token(&token_to_push, parser);
-                tokens.push(token_to_push);
-            }
-            match remaining_input {
-                Some(remaining) => Ok((remaining, tokens)),
-                None => Err(nom::Err::Failure(Error::new(
-                    "No valid value",
-                    ErrorKind::IsNot,
-                ))),
-            }
+            tokens.push(token);
+            Ok((remaining, tokens))
         }
-        JsonParserState::AwatingNameSeparator => Ok(("", Vec::new())),
-        JsonParserState::AwaitingName => Ok(("", Vec::new())),
-        JsonParserState::AwaitingRecordSeparator => Ok(("", Vec::new())),
-        JsonParserState::AwaitingValueSeparator => {
-            let (input, space) = multispace0(input)?;
+        JsonParserState::AwaitingKeySeparator => {
+            let (input, name_sep) = tag(":")(input)?;
+            tokens.push(JsonToken::KeySeparator(name_sep));
+            parser.current_state = JsonParserState::AwaitingValue;
+            Ok((input, tokens))
+        }
+        JsonParserState::AwaitingKeyOrEnd => match tag::<_, _, Error<&str>>("}")(input) {
+            Ok((remaining, object_close)) => {
+                tokens.push(JsonToken::ObjectBracket(object_close));
+                assert_eq!(parser.context_stack.pop(), Some(JsonContext::Object));
 
-            if !space.is_empty() {
-                tokens.push(JsonToken::Whitespace(space));
+                match parser.context_stack.last() {
+                    None => {
+                        parser.current_state = JsonParserState::Done;
+                    }
+                    Some(JsonContext::Array) => {
+                        parser.current_state = JsonParserState::AwaitingValueSeparatorOrEnd;
+                    }
+                    Some(JsonContext::Object) => {
+                        parser.current_state = JsonParserState::AwaitingRecordSeparatorOrEnd
+                    }
+                }
+
+                Ok((remaining, tokens))
             }
+            Err(_) => {
+                let (input, identifier) = string_parser_global(input)?;
+                tokens.push(JsonToken::Identifier(identifier));
+                parser.current_state = JsonParserState::AwaitingKeySeparator;
+                Ok((input, tokens))
+            }
+        },
+        JsonParserState::AwaitingRecordSeparatorOrEnd => match tag::<_, _, Error<&str>>("}")(input)
+        {
+            Ok((remaining, object_close)) => {
+                tokens.push(JsonToken::ObjectBracket(object_close));
+                assert_eq!(parser.context_stack.pop(), Some(JsonContext::Object));
+                match parser.context_stack.last() {
+                    Some(JsonContext::Array) => {
+                        parser.current_state = JsonParserState::AwaitingValueSeparatorOrEnd;
+                    }
+                    Some(JsonContext::Object) => {
+                        parser.current_state = JsonParserState::AwaitingRecordSeparatorOrEnd;
+                    }
+                    None => parser.current_state = JsonParserState::Done,
+                }
+                Ok((remaining, tokens))
+            }
+            Err(_) => {
+                let (input, comma) = tag(",")(input)?;
+                tokens.push(JsonToken::ValueSeparator(comma));
+                parser.current_state = JsonParserState::AwaitingKeyOrEnd;
+                Ok((input, tokens))
+            }
+        },
+        JsonParserState::AwaitingValueOrEnd => match tag::<_, _, Error<&str>>("]")(input) {
+            Ok((remaining, array_close)) => {
+                tokens.push(JsonToken::ArrayBracket(array_close));
+                assert_eq!(parser.context_stack.pop(), Some(JsonContext::Array));
+                parser.current_state = JsonParserState::AwaitingRecordSeparatorOrEnd;
 
+                match parser.context_stack.last() {
+                    Some(JsonContext::Array) => {
+                        parser.current_state = JsonParserState::AwaitingValueSeparatorOrEnd;
+                    }
+                    Some(JsonContext::Object) => {
+                        parser.current_state = JsonParserState::AwaitingRecordSeparatorOrEnd;
+                    }
+                    None => parser.current_state = JsonParserState::Done,
+                }
+
+                Ok((remaining, tokens))
+            }
+            Err(_) => {
+                let (input, comma) = tag(",")(input)?;
+                tokens.push(JsonToken::ValueSeparator(comma));
+                parser.current_state = JsonParserState::AwaitingValue;
+                Ok((input, tokens))
+            }
+        },
+        JsonParserState::AwaitingValueSeparatorOrEnd => {
             match tag::<_, _, Error<&str>>("]")(input) {
                 Ok((remaining, array_close)) => {
                     tokens.push(JsonToken::ArrayBracket(array_close));
-                    parser.current_state = JsonParserState::AwaitingRecordSeparator;
+                    assert_eq!(parser.context_stack.pop(), Some(JsonContext::Array));
+                    parser.current_state = JsonParserState::AwaitingRecordSeparatorOrEnd;
                     Ok((remaining, tokens))
                 }
                 Err(_) => {
                     let (input, comma) = tag(",")(input)?;
                     tokens.push(JsonToken::ValueSeparator(comma));
-                    parser.current_state = JsonParserState::AwaitingValue;
+                    parser.current_state = JsonParserState::AwaitingValueOrEnd;
                     Ok((input, tokens))
                 }
             }
         }
+        JsonParserState::Done => {
+            assert!(input.is_empty());
+            Ok(("", Vec::new()))
+        }
     };
-
-    if let Ok((_, ref tokens)) = ret {
-        parser.last_seen_token = tokens.last().cloned();
-    }
 
     ret
 }
 
 pub fn parse_json_editor(input: &Vec<String>) -> Vec<Vec<JsonToken>> {
-    Vec::new()
+    let mut parser = JsonParser {
+        current_state: JsonParserState::AwaitingValue,
+        context_stack: Vec::new(),
+    };
+
+    let mut token_lines = Vec::new();
+
+    for line in input {
+        let mut curr_line: &str = line;
+        let mut line_tokens = Vec::new();
+        while !curr_line.is_empty() {
+            match parse_json_editor_line(curr_line, &mut parser) {
+                Ok((remaining, new_tokens)) => {
+                    curr_line = remaining;
+                    line_tokens.extend(new_tokens);
+                }
+                Err(_) => {
+                    line_tokens.push(JsonToken::Invalid(curr_line));
+                    break;
+                }
+            }
+        }
+        token_lines.push(line_tokens)
+    }
+
+    token_lines
 }
 
 #[cfg(test)]
@@ -470,6 +556,8 @@ mod tests {
     use std::{collections::HashMap, time::Duration};
 
     use super::*;
+
+    fn test_json_parser() {}
 
     #[test]
     fn test_individual_request_parser() {

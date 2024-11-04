@@ -111,14 +111,14 @@ pub mod widget_common {
         editor_col: usize,
         text: &'widget str,
         color: Color,
-        area: &Rect,
+        area_width: u16,
         cursor_has_to_be_set: bool,
         is_cursor_set: &mut bool,
         current_col: &mut usize,
         lines: &mut Vec<Line<'widget>>,
         spans: &mut Vec<Span<'widget>>,
     ) {
-        let will_overflow = *current_col + text.len() > area.width as usize;
+        let will_overflow = *current_col + text.len() > area_width as usize;
         match (cursor_has_to_be_set, will_overflow) {
             (false, false) => {
                 spans.push(Span::raw(text).fg(color));
@@ -134,21 +134,21 @@ pub mod widget_common {
                 spans.push(Span::raw(rest_of_span).fg(color));
             }
             (false, true) => {
-                let remaining_space_in_line = area.width as usize - *current_col;
+                let remaining_space_in_line = area_width as usize - *current_col;
                 let (start, mut end) = text.split_at(remaining_space_in_line);
                 spans.push(Span::raw(start).fg(color));
                 lines.push(Line::from(std::mem::take(spans)));
-                while end.len() > area.width as usize {
-                    spans.push(Span::raw(&end[..area.width as usize]).fg(color));
+                while end.len() > area_width as usize {
+                    spans.push(Span::raw(&end[..area_width as usize]).fg(color));
                     lines.push(Line::from(std::mem::take(spans)));
-                    end = &end[area.width as usize..];
+                    end = &end[area_width as usize..];
                 }
                 spans.push(Span::raw(end).fg(color));
                 *current_col = end.len().checked_sub(1).unwrap_or(0);
             }
             (true, true) => {
                 *is_cursor_set = true;
-                let mut remaining_space_in_line = area.width as usize - *current_col;
+                let mut remaining_space_in_line = area_width as usize - *current_col;
 
                 let line_cursor_idx = editor_col - *current_col;
 
@@ -165,19 +165,19 @@ pub mod widget_common {
                         let mut remaining_before_cursor_text =
                             &before_cursor[remaining_space_in_line..];
 
-                        while remaining_before_cursor_text.len() > area.width as usize {
+                        while remaining_before_cursor_text.len() > area_width as usize {
                             spans.push(
-                                Span::raw(&remaining_before_cursor_text[..area.width as usize])
+                                Span::raw(&remaining_before_cursor_text[..area_width as usize])
                                     .fg(color),
                             );
                             lines.push(Line::from(std::mem::take(spans)));
                             remaining_before_cursor_text =
-                                &remaining_before_cursor_text[area.width as usize..];
+                                &remaining_before_cursor_text[area_width as usize..];
                         }
 
                         spans.push(Span::raw(remaining_before_cursor_text).fg(color));
                         remaining_space_in_line =
-                            area.width as usize - remaining_before_cursor_text.len();
+                            area_width as usize - remaining_before_cursor_text.len();
                     }
                 }
                 match containing_and_after_cursor.len() {
@@ -193,7 +193,7 @@ pub mod widget_common {
                             Some(new) => new,
                             None => {
                                 lines.push(Line::from(std::mem::take(spans)));
-                                area.width as usize
+                                area_width as usize
                             }
                         };
                         let mut after_cursor = &containing_and_after_cursor[1..];
@@ -205,7 +205,7 @@ pub mod widget_common {
                             lines.push(Line::from(std::mem::take(spans)));
                             after_cursor = &after_cursor[remaining_space_in_line..];
 
-                            remaining_space_in_line = area.width as usize;
+                            remaining_space_in_line = area_width as usize;
                         }
                         spans.push(Span::raw(after_cursor).fg(color));
                         *current_col = after_cursor.len();
@@ -474,7 +474,7 @@ impl<'editor> Editor<'editor> {
                             self.col,
                             text,
                             color,
-                            &area,
+                            area.width,
                             cursor_has_to_be_set,
                             &mut is_cursor_set,
                             &mut current_col,
@@ -487,7 +487,7 @@ impl<'editor> Editor<'editor> {
                             self.col,
                             text,
                             Color::White,
-                            &area,
+                            area.width,
                             cursor_has_to_be_set,
                             &mut is_cursor_set,
                             &mut current_col,
