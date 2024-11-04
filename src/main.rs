@@ -54,10 +54,12 @@ impl Drop for App {
 
 //TODO
 //request result navigation
-//vertical scrolling for editor and result navigation
 //json filtering
 //fix vim keybinds
 //correct error handling and ui improvements
+//CONSIDER CURL REDIRECT FLAG?
+//consider curl basic auth?
+//file uploads curl
 
 pub mod keys {
     pub const UP: char = 'k';
@@ -407,12 +409,14 @@ fn main() -> Result<(), crate::error::Error> {
     }
 
     let jq_state = unsafe { jq_init() };
+
     if jq_state.is_null() {
         ratatui::restore();
         disable_raw_mode()?;
-        eprint!("Unable to start jq");
+        eprintln!("Unable to start jq");
         std::process::exit(1);
     }
+
     let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state, jq_state);
     app.run(&mut terminal)?;
     ratatui::restore();

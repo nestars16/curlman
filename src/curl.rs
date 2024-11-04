@@ -1,8 +1,12 @@
-use ratatui::widgets::WidgetRef;
+use ratatui::{
+    style::Color,
+    text::Line,
+    widgets::{Paragraph, Wrap},
+};
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
-    io::Read,
+    io::{Cursor, Read},
     sync::atomic::{AtomicU16, Ordering},
 };
 
@@ -10,8 +14,8 @@ use crate::{
     editor::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
-        widget_common::fit_tokens_into_editor_window,
-        CurlmanWidget, InputListener, WidgetCommand,
+        widget_common::{self, fit_and_process_text_tokens_into_editor_window},
+        CurlmanWidget, CursorMovement, InputListener, WidgetCommand,
     },
     error::Error,
     parser::{parse_json_editor, JsonToken},
@@ -42,6 +46,7 @@ enum FormatterError {
 pub struct RequestExecutor {
     block: Block<'static>,
     selected: bool,
+    body_cursor: Option<Cursor<Vec<u8>>>,
     row: usize,
     col: usize,
     top_row: u16,
@@ -73,6 +78,7 @@ impl RequestExecutor {
             editor_representation: Vec::new(),
             executor_width: AtomicU16::new(0),
             col: 0,
+            body_cursor: None,
         }
     }
 
@@ -86,7 +92,8 @@ impl RequestExecutor {
         };
 
         self.headers.clear();
-        self.handle.url(url.as_ref())?;
+        self.handle.url(url.as_str())?;
+
         let mut header_list = List::new();
         for (key, value) in req.headers {
             header_list.append(&format!("{key}: {value}"))?;
@@ -98,7 +105,6 @@ impl RequestExecutor {
             Method::GET => {
                 self.handle.get(true)?;
                 let mut transfer = self.handle.transfer();
-
                 transfer.header_function(|into| {
                     match String::from_utf8_lossy(into).split_once(':') {
                         Some((header_name, header_value)) => 'some_block: {
@@ -111,10 +117,8 @@ impl RequestExecutor {
                         }
                         None => {}
                     };
-
                     true
                 })?;
-
                 transfer.write_function(|data| {
                     self.output_data.extend_from_slice(data);
                     Ok(data.len())
@@ -124,30 +128,36 @@ impl RequestExecutor {
             }
             Method::POST => {
                 self.handle.post(true)?;
-                let Some(body) = req.body else {
-                    return Err(Error::NoBody);
-                };
+                let body = req.body.unwrap_or(Vec::new());
+                self.body_cursor = Some(Cursor::new(body));
+
                 let mut transfer = self.handle.transfer();
+
                 transfer.header_function(|into| {
                     match String::from_utf8_lossy(into).split_once(':') {
                         Some((header_name, header_value)) => 'some_block: {
                             let header_name_parse_res = header_name.parse::<HeaderName>();
-
                             let Ok(header_name) = header_name_parse_res else {
                                 break 'some_block;
                             };
 
                             self.headers.insert(header_name, header_value.to_string());
                         }
-
                         None => {}
                     };
                     true
                 })?;
 
-                transfer.read_function(|into| match body.as_slice().read(into) {
-                    Ok(read) => Ok(read),
-                    Err(_) => Err(ReadError::Abort),
+                transfer.read_function(|into| {
+                    match self
+                        .body_cursor
+                        .as_mut()
+                        .expect("Body Cursor MUST exist")
+                        .read(into)
+                    {
+                        Ok(n) => Ok(n),
+                        Err(_) => Err(ReadError::Abort),
+                    }
                 })?;
 
                 transfer.write_function(|data| {
@@ -155,7 +165,9 @@ impl RequestExecutor {
                     Ok(data.len())
                 })?;
 
-                transfer.perform().map_err(|e| e.into())
+                let ret = transfer.perform().map_err(|e| e.into());
+
+                ret
             }
             _ => {
                 unimplemented!()
@@ -163,8 +175,55 @@ impl RequestExecutor {
         }
     }
 
-    pub fn get_executor_output(&self, area: Rect) -> Text {
-        Text::from("")
+    fn adjust_viewport(&mut self) {
+        let editor_height_val = self
+            .executor_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        if let Some(new_top_row) = widget_common::adjust_viewport(
+            editor_height_val as i32,
+            self.top_row as i32,
+            self.row as i32,
+        ) {
+            self.top_row = new_top_row
+        }
+    }
+
+    fn move_cursor(&mut self, operator: CursorMovement) {
+        if let Some((new_row, new_col)) = widget_common::get_next_cursor_position(
+            self.row,
+            self.col,
+            &self.editor_representation,
+            operator,
+        ) {
+            self.col = new_col;
+            self.row = new_row;
+            self.adjust_viewport()
+        }
+    }
+
+    fn get_raw_editor_representation(&self, area: Rect) -> Text {
+        let mut is_cursor_set = false;
+        let mut current_col = 0;
+        let mut lines = Vec::new();
+        let mut spans = Vec::new();
+
+        for (idx, line) in self.editor_representation.iter().enumerate() {
+            let cursor_has_to_be_set = self.row == idx;
+            fit_and_process_text_tokens_into_editor_window(
+                self.col,
+                line,
+                Color::White,
+                area.width,
+                cursor_has_to_be_set,
+                &mut is_cursor_set,
+                &mut current_col,
+                &mut lines,
+                &mut spans,
+            );
+        }
+
+        Text::from(lines)
     }
 }
 
@@ -184,26 +243,30 @@ impl StatefulWidgetRef for RequestExecutor {
 
         match self.editor_representation.is_empty() {
             true => {
-                Text::from(String::from_utf8_lossy(&self.output_data)).render(text_area, buf);
+                Paragraph::new(String::from_utf8_lossy(&self.output_data))
+                    .wrap(Wrap { trim: false })
+                    .render(text_area, buf);
             }
             false => match self.headers.get(&http::header::CONTENT_TYPE) {
                 Some(content_type) => match content_type.as_str() {
-                    "application/json" => {
-                        Text::from(self.json_formatter.format_lines_into_text(
+                    s if s.contains("application/json") => {
+                        let lines = self.json_formatter.format_lines_into_text(
                             &self.editor_representation,
-                            area.width,
+                            area,
+                            self.top_row as usize,
                             self.col,
-                        ))
-                        .render(text_area, buf);
+                            self.row,
+                        );
+                        (Text::from(lines)).render(text_area, buf);
                     }
                     _ => {
-                        let editor = self.editor_representation.join("\n");
-                        Text::from(editor).render(text_area, buf);
+                        self.get_raw_editor_representation(area)
+                            .render(text_area, buf);
                     }
                 },
                 None => {
-                    let editor = self.editor_representation.join("\n");
-                    Text::from(editor).render(text_area, buf);
+                    self.get_raw_editor_representation(area)
+                        .render(text_area, buf);
                 }
             },
         }
@@ -217,6 +280,21 @@ impl InputListener for RequestExecutor {
             crossterm::event::Event::FocusLost => {}
             crossterm::event::Event::Key(key_event) => match key_event {
                 KeyEvent {
+                    code: KeyCode::Up, ..
+                } => self.move_cursor(CursorMovement::Up),
+                KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                } => self.move_cursor(CursorMovement::Down),
+                KeyEvent {
+                    code: KeyCode::Left,
+                    ..
+                } => self.move_cursor(CursorMovement::Left),
+                KeyEvent {
+                    code: KeyCode::Right,
+                    ..
+                } => self.move_cursor(CursorMovement::Right),
+                KeyEvent {
                     code: KeyCode::Char(ch),
                     modifiers: KeyModifiers::CONTROL,
                     ..
@@ -225,35 +303,55 @@ impl InputListener for RequestExecutor {
                     code: KeyCode::Char(ch),
                     ..
                 } => {
-                    if ch == 'E' {
-                        self.output_data.clear();
-                        match self.perform_request() {
-                            Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
-                                Some(content_type) => match content_type.as_str() {
-                                    s if s.contains("application/json") => {
-                                        let json_lines_res = self
-                                            .json_formatter
-                                            .format_output_data_into_lines(&self.output_data);
+                    match ch {
+                        'E' => {
+                            self.output_data.clear();
+                            let perform_request_result = self.perform_request();
 
-                                        match json_lines_res {
-                                            Ok(lines) => {
-                                                self.editor_representation = lines;
-                                            }
-                                            Err(e) => {
-                                                self.output_data =
-                                                    format!("An error ocurred : {:?}", e).into()
+                            self.col = 0;
+                            self.row = 0;
+                            self.top_row = 0;
+
+                            match perform_request_result {
+                                Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
+                                    Some(content_type) => match content_type.as_str() {
+                                        s if s.contains("application/json") => {
+                                            let json_lines_res = self
+                                                .json_formatter
+                                                .format_output_data_into_lines(&self.output_data);
+
+                                            match json_lines_res {
+                                                Ok(lines) => {
+                                                    self.editor_representation = lines;
+                                                }
+                                                Err(e) => {
+                                                    self.output_data =
+                                                        format!("An error ocurred : {:?}", e).into()
+                                                }
                                             }
                                         }
+                                        _ => {
+                                            self.editor_representation =
+                                                String::from_utf8_lossy(&self.output_data)
+                                                    .to_string()
+                                                    .split('\n')
+                                                    .map(|str| str.to_string())
+                                                    .collect();
+                                        }
+                                    },
+                                    None => {
+                                        self.output_data =
+                                            "The response contained no Content-Type header".into();
                                     }
-                                    _ => {}
                                 },
-                                None => {}
-                            },
-                            Err(e) => {
-                                self.output_data = format!("There was an error\n{:?}", e).into()
+                                Err(e) => {
+                                    self.output_data =
+                                        format!("There was an error\n{:?}", e).into();
+                                }
                             }
                         }
-                    }
+                        _ => {}
+                    };
                 }
                 _ => {}
             },
@@ -303,7 +401,6 @@ impl JsonFormatter {
             } else {
                 unsafe { jv_free(input_jv) }
             }
-
             return Err(FormatterError::InvalidInput);
         }
 
@@ -313,29 +410,43 @@ impl JsonFormatter {
                 (jv_print_flags_JV_PRINT_PRETTY | jv_print_flags_JV_PRINT_SPACE1) as i32,
             )
         };
+
         let jv_c_string_val = unsafe { jv_string_value(dump_string) };
-        let jv_output_string = unsafe { CStr::from_ptr(jv_c_string_val) }.to_string_lossy();
+        let jv_output_string = unsafe { CStr::from_ptr(jv_c_string_val) }
+            .to_string_lossy()
+            .to_string();
+
         unsafe { jv_free(dump_string) };
+
         Ok(jv_output_string.split('\n').map(|l| l.to_owned()).collect())
     }
 
     pub fn format_lines_into_text<'a>(
         &self,
         lines: &'a Vec<String>,
-        area_width: u16,
+        area: Rect,
+        top_row: usize,
         editor_col: usize,
+        editor_row: usize,
     ) -> Text<'a> {
         let tokenized_lines = parse_json_editor(lines);
-        panic!("{:?}", tokenized_lines);
-
         let mut lines = Vec::new();
         let mut spans = Vec::new();
+        let mut is_cursor_set = false;
 
-        let mut is_cursor_set = true;
-        for line in tokenized_lines {
+        for (idx, line) in tokenized_lines.iter().enumerate() {
+            if idx < top_row as usize || idx >= top_row as usize + area.height as usize {
+                continue;
+            }
             let mut current_col = 0;
             for token in line {
                 let color = token.get_color(&self.colorscheme);
+                let line_token_len = token.get_str().len();
+                let line_token_end = (current_col + line_token_len).checked_sub(1).unwrap_or(0);
+
+                let cursor_has_to_be_set =
+                    !is_cursor_set && idx == editor_row && line_token_end >= editor_col;
+
                 match token {
                     JsonToken::ObjectBracket(text)
                     | JsonToken::ArrayBracket(text)
@@ -345,12 +456,12 @@ impl JsonFormatter {
                     | JsonToken::Literal(text)
                     | JsonToken::String(text)
                     | JsonToken::Whitespace(text)
-                    | JsonToken::Invalid(text) => fit_tokens_into_editor_window(
+                    | JsonToken::Invalid(text) => fit_and_process_text_tokens_into_editor_window(
                         editor_col,
                         text,
                         color,
-                        area_width,
-                        false,
+                        area.width,
+                        cursor_has_to_be_set,
                         &mut is_cursor_set,
                         &mut current_col,
                         &mut lines,
@@ -358,8 +469,8 @@ impl JsonFormatter {
                     ),
                 }
             }
+            lines.push(Line::from(std::mem::take(&mut spans)));
         }
-
         Text::from(lines)
     }
 }
@@ -396,30 +507,5 @@ mod tests {
                 "}".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn test_formatting_lines_into_text() {
-        let mut jq_state = unsafe { jq_init() };
-
-        if jq_state.is_null() {
-            panic!("Couldn't initialize jq");
-        }
-
-        let formatter = JsonFormatter {
-            colorscheme: get_default_output_colorscheme(),
-        };
-
-        let input = vec![
-            "{".to_string(),
-            "  \"name\": \"John\",".to_string(),
-            "  \"age\": 30".to_string(),
-            "}".to_string(),
-        ];
-
-        let result = parse_json_editor(&input);
-
-        dbg!(result);
-        unsafe { jq_teardown(&mut jq_state) };
     }
 }

@@ -11,11 +11,6 @@ use nom::{
     IResult,
 };
 
-//TODO?
-//CONSIDER CURL REDIRECT FLAG?
-//consider basic auth?
-//file uploads?
-
 use ratatui::style::Color;
 use url::Url;
 
@@ -328,6 +323,19 @@ pub enum JsonToken<'editor_repr> {
 }
 
 impl<'repr> JsonToken<'repr> {
+    pub fn get_str(&self) -> &str {
+        match self {
+            JsonToken::ObjectBracket(text)
+            | JsonToken::ArrayBracket(text)
+            | JsonToken::KeySeparator(text)
+            | JsonToken::Identifier(text)
+            | JsonToken::ValueSeparator(text)
+            | JsonToken::Literal(text)
+            | JsonToken::String(text)
+            | JsonToken::Whitespace(text)
+            | JsonToken::Invalid(text) => text,
+        }
+    }
     pub fn get_color(&self, colorscheme: &JsonOutputColorscheme) -> Color {
         match self {
             JsonToken::ObjectBracket(_) => colorscheme.object_bracket_color,
@@ -338,7 +346,7 @@ impl<'repr> JsonToken<'repr> {
             JsonToken::String(_) => colorscheme.string_color,
             JsonToken::Whitespace(_) => Color::White,
             JsonToken::Invalid(_) => colorscheme.invalid_color,
-            JsonToken::Identifier(_) => colorscheme.string_color,
+            JsonToken::Identifier(_) => colorscheme.identifier_color,
         }
     }
 }
@@ -489,8 +497,6 @@ fn parse_json_editor_line<'a>(
                 Ok((remaining, tokens))
             }
             Err(_) => {
-                let (input, comma) = tag(",")(input)?;
-                tokens.push(JsonToken::ValueSeparator(comma));
                 parser.current_state = JsonParserState::AwaitingValue;
                 Ok((input, tokens))
             }
@@ -512,7 +518,11 @@ fn parse_json_editor_line<'a>(
             }
         }
         JsonParserState::Done => {
-            assert!(input.is_empty());
+            if !input.is_empty() {
+                eprintln!("Input not empty {input}");
+                ratatui::restore();
+                std::process::exit(0);
+            }
             Ok(("", Vec::new()))
         }
     };
@@ -556,8 +566,6 @@ mod tests {
     use std::{collections::HashMap, time::Duration};
 
     use super::*;
-
-    fn test_json_parser() {}
 
     #[test]
     fn test_individual_request_parser() {

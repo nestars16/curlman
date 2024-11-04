@@ -1,7 +1,3 @@
-//TODO?
-//Add vertical scrolling of text?
-//timeout for motions?
-
 use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
 use colors::{get_default_editor_colorscheme, EditorColorscheme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -18,7 +14,6 @@ use std::sync::atomic::AtomicU16;
 pub mod widget_common {
 
     use ratatui::{
-        layout::Rect,
         style::Color,
         style::Stylize,
         text::{Line, Span},
@@ -107,7 +102,7 @@ pub mod widget_common {
         }
     }
 
-    pub fn fit_tokens_into_editor_window<'widget>(
+    pub fn fit_and_process_text_tokens_into_editor_window<'widget>(
         editor_col: usize,
         text: &'widget str,
         color: Color,
@@ -236,6 +231,7 @@ pub mod colors {
         pub literal_color: Color,
         pub invalid_color: Color,
         pub string_color: Color,
+        pub identifier_color: Color,
     }
 
     pub fn get_default_editor_colorscheme() -> EditorColorscheme {
@@ -255,9 +251,10 @@ pub mod colors {
             array_bracket_color: Color::White,
             name_separator_color: Color::White,
             value_separator_color: Color::White,
-            literal_color: Color::Green,
-            string_color: Color::Blue,
+            literal_color: Color::White,
+            string_color: Color::Green,
             invalid_color: Color::White,
+            identifier_color: Color::Blue,
         }
     }
 }
@@ -470,7 +467,7 @@ impl<'editor> Editor<'editor> {
                     | crate::parser::Token::ParamValue(text)
                     | crate::parser::Token::Unknown(text)
                     | crate::parser::Token::Separator(text) => {
-                        widget_common::fit_tokens_into_editor_window(
+                        widget_common::fit_and_process_text_tokens_into_editor_window(
                             self.col,
                             text,
                             color,
@@ -483,7 +480,7 @@ impl<'editor> Editor<'editor> {
                         )
                     }
                     crate::parser::Token::Whitespace(text) => {
-                        widget_common::fit_tokens_into_editor_window(
+                        widget_common::fit_and_process_text_tokens_into_editor_window(
                             self.col,
                             text,
                             Color::White,
@@ -520,7 +517,6 @@ impl<'editor> Editor<'editor> {
                     }
                 },
             },
-            Event::Paste(e) => self.lines[self.row].insert_str(self.col, &e),
             _ => {}
         };
 
@@ -752,6 +748,11 @@ impl<'editor> Editor<'editor> {
     }
 
     fn insert_char(&mut self, ch: char) {
+        if ch == '\n' || ch == '\r' {
+            self.insert_newline();
+            return;
+        }
+
         let line = &mut self.lines[self.row];
 
         let insert_idx = line
