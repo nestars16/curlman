@@ -182,9 +182,7 @@ struct Request {
 pub fn parse_curlman_request_file(
     input: &str,
 ) -> IResult<&str, Vec<RequestInfo>, VerboseError<&str>> {
-    let requests = separated_list0(tag("==="), parse_curlman_request)(input);
-    let requests = Vec::new();
-
+    let (input, requests) = separated_list0(tag("==="), parse_curlman_request)(input)?;
     Ok((input, requests))
 }
 

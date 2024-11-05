@@ -18,18 +18,18 @@ impl ToString for Error {
     fn to_string(&self) -> String {
         match self {
             Error::UnsupportedMethod(method) => {
-                format!("Unsupported Method:\n {method}")
+                format!("Unsupported Method:\n{method}")
             }
             Error::MissingUrl(text) => text.to_string(),
             Error::Curl(error) => {
-                format!("cURL error : \n{}", error.to_string())
+                format!("cURL error:\n{}", error.to_string())
             }
             Error::NoBody => "Request is missing body".to_string(),
             Error::Io(error) => {
-                format!("I/O error \n: {}", error.to_string())
+                format!("I/O error:\n{}", error.to_string())
             }
             Error::InvalidState(reason) => {
-                format!("Error\n: {reason}")
+                format!("Error:\n{reason}")
             }
         }
     }
