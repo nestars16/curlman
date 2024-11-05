@@ -1,11 +1,38 @@
 #[derive(Debug)]
 pub enum Error {
-    InvalidUrl,
+    UnsupportedMethod(String),
+    MissingUrl(&'static str),
     Curl(curl::Error),
     NoBody,
-    ParserError,
     Io(std::io::Error),
-    InvalidState,
+    InvalidState(&'static str),
+}
+
+pub mod parser {
+    pub enum Error {
+        InvalidUrl(String),
+    }
+}
+
+impl ToString for Error {
+    fn to_string(&self) -> String {
+        match self {
+            Error::UnsupportedMethod(method) => {
+                format!("Unsupported Method:\n {method}")
+            }
+            Error::MissingUrl(text) => text.to_string(),
+            Error::Curl(error) => {
+                format!("cURL error : \n{}", error.to_string())
+            }
+            Error::NoBody => "Request is missing body".to_string(),
+            Error::Io(error) => {
+                format!("I/O error \n: {}", error.to_string())
+            }
+            Error::InvalidState(reason) => {
+                format!("Error\n: {reason}")
+            }
+        }
+    }
 }
 
 impl From<curl::Error> for Error {

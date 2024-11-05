@@ -127,6 +127,7 @@ pub enum CurlmanRequestParamType {
     Method,
     Header,
     Body(BodyType),
+    Timeout,
 }
 
 impl FromStr for CurlmanRequestParamType {
@@ -136,6 +137,7 @@ impl FromStr for CurlmanRequestParamType {
             "-X" => Ok(Self::Method),
             "-H" => Ok(Self::Header),
             "-d" | "--data" => Ok(Self::Body(BodyType::Json)),
+            "-m" | "--max" => Ok(Self::Timeout),
             _ => Err(()),
         }
     }

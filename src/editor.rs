@@ -26,7 +26,7 @@ pub mod widget_common {
     pub fn adjust_viewport(editor_height: i32, top_row: i32, current_row: i32) -> Option<u16> {
         let row_pos_in_viewport = top_row + editor_height - current_row;
 
-        if row_pos_in_viewport <= 0 {
+        if row_pos_in_viewport <= 2 {
             Some((top_row + 1) as u16)
         } else if row_pos_in_viewport >= editor_height {
             Some(current_row as u16)
@@ -129,23 +129,30 @@ pub mod widget_common {
                 spans.push(Span::raw(rest_of_span).fg(color));
             }
             (false, true) => {
-                let remaining_space_in_line = area_width as usize - *current_col;
+                let remaining_space_in_line =
+                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
+
                 let (start, mut end) = text.split_at(remaining_space_in_line);
+
                 spans.push(Span::raw(start).fg(color));
                 lines.push(Line::from(std::mem::take(spans)));
+
                 while end.len() > area_width as usize {
                     spans.push(Span::raw(&end[..area_width as usize]).fg(color));
                     lines.push(Line::from(std::mem::take(spans)));
                     end = &end[area_width as usize..];
                 }
+
                 spans.push(Span::raw(end).fg(color));
                 *current_col = end.len().checked_sub(1).unwrap_or(0);
             }
             (true, true) => {
                 *is_cursor_set = true;
-                let mut remaining_space_in_line = area_width as usize - *current_col;
 
-                let line_cursor_idx = editor_col - *current_col;
+                let mut remaining_space_in_line =
+                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
+
+                let line_cursor_idx = editor_col.checked_sub(*current_col).unwrap_or(0);
 
                 let (before_cursor, containing_and_after_cursor) = text.split_at(line_cursor_idx);
 
@@ -171,8 +178,10 @@ pub mod widget_common {
                         }
 
                         spans.push(Span::raw(remaining_before_cursor_text).fg(color));
-                        remaining_space_in_line =
-                            area_width as usize - remaining_before_cursor_text.len();
+
+                        remaining_space_in_line = (area_width as usize)
+                            .checked_sub(remaining_before_cursor_text.len())
+                            .unwrap_or(0);
                     }
                 }
                 match containing_and_after_cursor.len() {
@@ -437,7 +446,7 @@ impl<'editor> Editor<'editor> {
     }
 
     fn get_editor_text(&self, area: Rect) -> Text {
-        let tokenized_lines = parse_curlman_editor(&self.lines, &self.colorscheme);
+        let tokenized_lines = parse_curlman_editor(&self.lines);
 
         let mut spans = Vec::new();
         let mut lines = Vec::new();
@@ -498,9 +507,17 @@ impl<'editor> Editor<'editor> {
             }
 
             if row_idx == self.row && self.col == self.lines[self.row].len() {
+                if self.col as u16 == area.width {
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                }
+
                 spans.push(Span::raw(" ").reversed());
             }
 
+            lines.push(Line::from(std::mem::take(&mut spans)));
+        }
+
+        if !spans.is_empty() {
             lines.push(Line::from(std::mem::take(&mut spans)));
         }
 
@@ -890,7 +907,6 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         };
 
         let status_bar_content = Line::from(status_bar_str);
-
         status_bar_content.render(command_bar_area, buf);
     }
 }

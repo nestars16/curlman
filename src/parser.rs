@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use http::Method;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, tag, take, take_till, take_while, take_while1},
     character::complete::{char, multispace0, multispace1, none_of, one_of},
-    combinator::{map, recognize},
-    error::{Error, ErrorKind},
+    combinator::{map, map_res, recognize},
+    error::{Error, VerboseError, VerboseErrorKind},
     multi::{many1, separated_list0},
     number::complete::recognize_float,
     sequence::{delimited, pair, separated_pair, tuple},
@@ -73,7 +75,7 @@ impl<'a> Token<'a> {
     }
 }
 
-fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo> {
+fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, VerboseError<&str>> {
     let string_parser = alt((
         delimited(char('"'), take_till(|ch: char| ch == '"'), char('"')),
         delimited(char('\''), take_till(|ch: char| ch == '\''), char('\'')),
@@ -94,19 +96,22 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo> {
 
     for (param_type, value) in params {
         let param_type_res: Result<CurlmanRequestParamType, _> = param_type.parse();
+
         let Ok(param_type) = param_type_res else {
-            return Err(nom::Err::Failure(Error {
-                input,
-                code: ErrorKind::IsNot,
+            return Err(nom::Err::Failure(VerboseError {
+                errors: vec![(
+                    param_type,
+                    VerboseErrorKind::Context("Invalid Parameter Type"),
+                )],
             }));
         };
+
         match param_type {
             CurlmanRequestParamType::Method => {
                 let method_res: Result<Method, _> = value.parse();
                 let Ok(method) = method_res else {
-                    return Err(nom::Err::Failure(Error {
-                        input,
-                        code: ErrorKind::IsNot,
+                    return Err(nom::Err::Failure(VerboseError {
+                        errors: vec![(value, VerboseErrorKind::Context("Invalid Request Method"))],
                     }));
                 };
                 request_info.method = method
@@ -124,23 +129,35 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo> {
             CurlmanRequestParamType::Body(BodyType::Json) => {
                 request_info.body = Some(value.as_bytes().into());
             }
+            CurlmanRequestParamType::Timeout => {
+                let (_, real_value) = decimal_integer(value).map_err(|_| {
+                    nom::Err::Failure(VerboseError {
+                        errors: vec![(
+                            value,
+                            VerboseErrorKind::Context("Invalid Request Timeout Len"),
+                        )],
+                    })
+                })?;
+
+                request_info.timeout = Duration::from_secs(real_value);
+            }
         }
     }
 
     Ok((input, request_info))
 }
 
-pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo> {
+pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo, VerboseError<&str>> {
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("curl")(input)?;
     let (input, _) = multispace1(input)?;
     let (input, url_str) = take_till(char::is_whitespace)(input)?;
 
     let url_res: Result<Url, _> = url_str.parse();
+
     let Ok(url) = url_res else {
-        return Err(nom::Err::Failure(Error {
-            input,
-            code: ErrorKind::IsNot,
+        return Err(nom::Err::Failure(VerboseError {
+            errors: vec![(url_str, VerboseErrorKind::Context("Invalid Url"))],
         }));
     };
 
@@ -162,8 +179,12 @@ struct Request {
     name: String,
 }
 
-pub fn parse_curlman_request_file(input: &str) -> IResult<&str, Vec<RequestInfo>> {
-    let (input, requests) = separated_list0(tag("==="), parse_curlman_request)(input)?;
+pub fn parse_curlman_request_file(
+    input: &str,
+) -> IResult<&str, Vec<RequestInfo>, VerboseError<&str>> {
+    let requests = separated_list0(tag("==="), parse_curlman_request)(input);
+    let requests = Vec::new();
+
     Ok((input, requests))
 }
 
@@ -178,7 +199,6 @@ enum RequestParserState {
 fn parse_curlman_editor_line<'a, 'b>(
     input: &'a str,
     parser_state: &'b mut RequestParserState,
-    colorscheme: &EditorColorscheme,
 ) -> IResult<&'a str, Vec<Token<'a>>> {
     let mut line_tokens = Vec::new();
     match parser_state {
@@ -281,10 +301,7 @@ fn parse_curlman_editor_line<'a, 'b>(
     };
 }
 
-pub fn parse_curlman_editor<'a>(
-    input: &'a Vec<String>,
-    colorscheme: &'a EditorColorscheme,
-) -> Vec<Vec<Token<'a>>> {
+pub fn parse_curlman_editor<'a>(input: &'a Vec<String>) -> Vec<Vec<Token<'a>>> {
     let mut editor_tokens = Vec::new();
     let mut line_tokens = Vec::new();
     let mut parser_state = RequestParserState::ExpectingCurl;
@@ -292,7 +309,7 @@ pub fn parse_curlman_editor<'a>(
     for line in input {
         let mut curr_str: &str = line;
         while !curr_str.is_empty() {
-            match parse_curlman_editor_line(curr_str, &mut parser_state, colorscheme) {
+            match parse_curlman_editor_line(curr_str, &mut parser_state) {
                 Ok((input, new_tokens)) => {
                     line_tokens.extend(new_tokens);
                     curr_str = input;
@@ -374,6 +391,12 @@ struct JsonParser {
 
 fn decimal(input: &str) -> IResult<&str, &str> {
     recognize(many1(one_of("0123456789")))(input)
+}
+
+fn decimal_integer(input: &str) -> IResult<&str, u64> {
+    map_res(recognize(many1(one_of("0123456789"))), |s: &str| {
+        s.parse::<u64>()
+    })(input)
 }
 
 fn parse_json_editor_line<'a>(
@@ -562,7 +585,6 @@ pub fn parse_json_editor(input: &Vec<String>) -> Vec<Vec<JsonToken>> {
 #[cfg(test)]
 mod tests {
 
-    use crate::editor::colors::get_default_editor_colorscheme;
     use std::{collections::HashMap, time::Duration};
 
     use super::*;
@@ -639,8 +661,7 @@ mod tests {
             String::from("-H \"Authorization"),
             String::from("-X POST"),
         ];
-        let colorscheme = get_default_editor_colorscheme();
-        let res = parse_curlman_editor(&input, &colorscheme);
+        let res = parse_curlman_editor(&input);
         assert!(!res.is_empty());
     }
 

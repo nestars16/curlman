@@ -1,7 +1,7 @@
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-mod curl;
 mod editor;
 mod error;
+mod executor;
 mod parser;
 mod types;
 
@@ -49,14 +49,14 @@ impl Drop for App {
         if !self.jq_handle.is_null() {
             unsafe { jq_teardown(&mut self.jq_handle) }
         }
+        ratatui::restore();
     }
 }
 
 //TODO
-//request result navigation
-//json filtering
-//fix vim keybinds
 //correct error handling and ui improvements
+//fix vim keybinds
+//json filtering
 //CONSIDER CURL REDIRECT FLAG?
 //consider curl basic auth?
 //file uploads curl
@@ -334,7 +334,7 @@ fn main() -> Result<(), crate::error::Error> {
         editor_start_state.unwrap_or(vec!["".to_string()]),
     ));
 
-    let output_widget = Box::new(curl::RequestExecutor::new());
+    let output_widget = Box::new(executor::RequestExecutor::new());
     let mut initally_selected_request = None;
     let mut initial_requests_vec = None;
 
@@ -419,7 +419,6 @@ fn main() -> Result<(), crate::error::Error> {
 
     let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state, jq_state);
     app.run(&mut terminal)?;
-    ratatui::restore();
     disable_raw_mode()?;
     Ok(())
 }
