@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use curl::multi;
 use http::Method;
 use nom::{
     branch::alt,
@@ -35,6 +36,7 @@ fn string_parser_global(input: &str) -> IResult<&str, &str> {
     ));
 
     let mut string_parser = recognize(alt((double_quoted, single_quoted)));
+
     string_parser(input)
 }
 
@@ -267,14 +269,11 @@ fn parse_curlman_editor_line<'a, 'b>(
             ));
 
             let (input, param) = param_parser(input)?;
-
             line_tokens.push(Token::ParamKey(param));
-
             let (input, space) = multispace0(input)?;
             if !space.is_empty() {
                 line_tokens.push(Token::Whitespace(space));
             }
-
             *parser_state = RequestParserState::ExpectingParamValue;
             return Ok((input, line_tokens));
         }
@@ -285,15 +284,14 @@ fn parse_curlman_editor_line<'a, 'b>(
             }
 
             let tag_parser = take_while1(|ch: char| ch.is_ascii_alphanumeric());
-
             let mut param_value_parser = alt((string_parser_global, tag_parser));
-
             let (input, param_value) = param_value_parser(input)?;
-
             line_tokens.push(Token::ParamValue(param_value));
-
+            let (input, space) = multispace0(input)?;
+            if !space.is_empty() {
+                line_tokens.push(Token::Whitespace(space));
+            }
             *parser_state = RequestParserState::ExpectingParamKey;
-
             return Ok((input, line_tokens));
         }
     };

@@ -1,7 +1,7 @@
 use ratatui::{
-    style::{Color, Modifier, Styled},
+    style::{Color, Modifier},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Clear, Paragraph, WidgetRef, Wrap},
 };
 use std::{
     collections::HashMap,
@@ -9,11 +9,13 @@ use std::{
     io::{Cursor, Read},
     sync::atomic::{AtomicU16, Ordering},
 };
+use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::{
     editor::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
+        get_round_bordered_box,
         widget_common::{self, fit_and_process_text_tokens_into_editor_window},
         CurlmanWidget, CursorMovement, InputListener, WidgetCommand,
     },
@@ -23,7 +25,7 @@ use crate::{
     AppState,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use curl::easy::{Easy, List, ReadError};
+use curl::easy::{Easy, ReadError};
 use http::{HeaderName, Method};
 use jq_sys::{
     jv_copy, jv_dump_string, jv_free, jv_get_kind, jv_invalid_get_msg, jv_invalid_has_msg,
@@ -35,12 +37,17 @@ use ratatui::{
     layout::Rect,
     style::{Style, Stylize},
     text::Text,
-    widgets::{Block, StatefulWidgetRef, Widget},
+    widgets::{Block, StatefulWidget, StatefulWidgetRef, Widget},
 };
 
 #[derive(Debug)]
 enum FormatterError {
     InvalidInput,
+}
+
+enum RequestExecutorView {
+    RequestBody,
+    Headers,
 }
 
 pub struct RequestExecutor {
@@ -50,6 +57,7 @@ pub struct RequestExecutor {
     row: usize,
     col: usize,
     top_row: u16,
+    header_list_state: ListState,
     executor_height: AtomicU16,
     executor_width: AtomicU16,
     json_formatter: JsonFormatter,
@@ -59,12 +67,14 @@ pub struct RequestExecutor {
     editor_representation: Vec<String>,
     headers: HashMap<HeaderName, String>,
     request: Option<RequestInfo>,
+    view: RequestExecutorView,
 }
 
 impl RequestExecutor {
     pub fn new() -> Self {
         Self {
-            block: editor::get_round_bordered_box(),
+            view: RequestExecutorView::RequestBody,
+            block: editor::get_round_bordered_box().title("Executor"),
             selected: false,
             output_data: Vec::new(),
             request: None,
@@ -81,6 +91,7 @@ impl RequestExecutor {
             col: 0,
             body_cursor: None,
             error: None,
+            header_list_state: ListState::default(),
         }
     }
 
@@ -96,7 +107,7 @@ impl RequestExecutor {
         self.headers.clear();
         self.handle.url(url.as_str())?;
 
-        let mut header_list = List::new();
+        let mut header_list = curl::easy::List::new();
         for (key, value) in req.headers {
             header_list.append(&format!("{key}: {value}"))?;
         }
@@ -193,10 +204,16 @@ impl RequestExecutor {
             .executor_height
             .load(std::sync::atomic::Ordering::Relaxed);
 
+        let editor_width_val = self
+            .executor_width
+            .load(std::sync::atomic::Ordering::Relaxed);
+
         if let Some(new_top_row) = widget_common::adjust_viewport(
             editor_height_val as i32,
+            editor_width_val,
             self.top_row as i32,
             self.row as i32,
+            &self.editor_representation,
         ) {
             self.top_row = new_top_row
         }
@@ -248,7 +265,7 @@ impl StatefulWidgetRef for RequestExecutor {
 
     #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
     #[doc = " to implement a custom stateful widget."]
-    fn render_ref(&self, area: Rect, buf: &mut Buffer, _: &mut Self::State) {
+    fn render_ref(&self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         self.executor_width.store(area.width, Ordering::Relaxed);
         self.executor_height.store(area.height, Ordering::Relaxed);
         let text_area = self.block.inner(area);
@@ -272,35 +289,74 @@ impl StatefulWidgetRef for RequestExecutor {
             return;
         }
 
-        match self.editor_representation.is_empty() {
-            true => {
-                Paragraph::new(String::from_utf8_lossy(&self.output_data))
-                    .wrap(Wrap { trim: false })
-                    .render(text_area, buf);
-            }
-            false => match self.headers.get(&http::header::CONTENT_TYPE) {
-                Some(content_type) => match content_type.as_str() {
-                    s if s.contains("application/json") => {
-                        let lines = self.json_formatter.format_lines_into_text(
-                            &self.editor_representation,
-                            area,
-                            self.top_row as usize,
-                            self.col,
-                            self.row,
-                            self.selected,
-                        );
-                        (Text::from(lines)).render(text_area, buf);
-                    }
-                    _ => {
+        match self.view {
+            RequestExecutorView::RequestBody => match self.editor_representation.is_empty() {
+                true => {
+                    Paragraph::new(String::from_utf8_lossy(&self.output_data))
+                        .wrap(Wrap { trim: false })
+                        .render(text_area, buf);
+                }
+                false => match self.headers.get(&http::header::CONTENT_TYPE) {
+                    Some(content_type) => match content_type.as_str() {
+                        s if s.contains("application/json") => {
+                            let lines = self.json_formatter.format_lines_into_text(
+                                &self.editor_representation,
+                                area,
+                                self.top_row as usize,
+                                self.col,
+                                self.row,
+                                self.selected,
+                            );
+                            (Text::from(lines)).render(text_area, buf);
+                        }
+                        _ => {
+                            self.get_raw_editor_representation(area)
+                                .render(text_area, buf);
+                        }
+                    },
+                    None => {
                         self.get_raw_editor_representation(area)
                             .render(text_area, buf);
                     }
                 },
-                None => {
-                    self.get_raw_editor_representation(area)
-                        .render(text_area, buf);
-                }
             },
+            RequestExecutorView::Headers => {
+                let request_headers = self
+                    .headers
+                    .iter()
+                    .map(|(k, v)| {
+                        let space = 1 + v.len().div_ceil(area.width as usize);
+                        (
+                            Paragraph::new(vec![Line::from_iter(
+                                [
+                                    Span::raw(k.as_str().to_string()).bold(),
+                                    Span::raw(": ".to_string()).bold(),
+                                    Span::raw(v.to_string()).italic(),
+                                ]
+                                .into_iter(),
+                            )])
+                            .wrap(Wrap { trim: true })
+                            .left_aligned(),
+                            if space > 2 { space } else { 1 },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let header_count = request_headers.len();
+
+                let builder = ListBuilder::new(move |context| {
+                    let (mut paragraph, height) = request_headers[context.index].clone();
+
+                    if context.is_selected {
+                        paragraph = paragraph.reversed();
+                    }
+
+                    (paragraph, height as u16)
+                });
+
+                let list = ListView::new(builder, header_count);
+                list.render(text_area, buf, &mut state.header_list_state);
+            }
         }
     }
 }
@@ -335,57 +391,77 @@ impl InputListener for RequestExecutor {
                     code: KeyCode::Char(ch),
                     ..
                 } => {
-                    match ch {
-                        'E' => {
-                            self.error = None;
-                            self.output_data.clear();
-                            let perform_request_result = self.perform_request();
-                            self.col = 0;
-                            self.row = 0;
-                            self.top_row = 0;
-                            match perform_request_result {
-                                Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
-                                    Some(content_type) => match content_type.as_str() {
-                                        s if s.contains("application/json") => {
-                                            let json_lines_res = self
-                                                .json_formatter
-                                                .format_output_data_into_lines(&self.output_data);
+                    if ch == 'E' {
+                        self.error = None;
+                        self.output_data.clear();
+                        let perform_request_result = self.perform_request();
+                        self.col = 0;
+                        self.row = 0;
+                        self.top_row = 0;
+                        match perform_request_result {
+                            Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
+                                Some(content_type) => match content_type.as_str() {
+                                    s if s.contains("application/json") => {
+                                        let json_lines_res = self
+                                            .json_formatter
+                                            .format_output_data_into_lines(&self.output_data);
 
-                                            match json_lines_res {
-                                                Ok(lines) => {
-                                                    self.editor_representation = lines;
-                                                }
-                                                Err(e) => {
-                                                    self.output_data =
-                                                        format!("An error ocurred : {:?}", e).into()
-                                                }
+                                        match json_lines_res {
+                                            Ok(lines) => {
+                                                self.editor_representation = lines;
+                                            }
+                                            Err(e) => {
+                                                self.output_data =
+                                                    format!("An error ocurred : {:?}", e).into()
                                             }
                                         }
-                                        _ => {
-                                            self.editor_representation =
-                                                String::from_utf8_lossy(&self.output_data)
-                                                    .to_string()
-                                                    .split('\n')
-                                                    .map(|str| str.to_string())
-                                                    .collect();
-                                        }
-                                    },
-                                    None => {
-                                        self.output_data =
-                                            "The response contained no Content-Type header".into();
+                                    }
+                                    _ => {
+                                        self.editor_representation =
+                                            String::from_utf8_lossy(&self.output_data)
+                                                .to_string()
+                                                .split('\n')
+                                                .map(|str| str.to_string())
+                                                .collect();
                                     }
                                 },
-                                Err(e) => self.error = Some(e),
-                            }
+                                None => {
+                                    self.output_data =
+                                        "The response contained no Content-Type header".into();
+                                }
+                            },
+                            Err(e) => self.error = Some(e),
                         }
-                        _ => {}
+
+                        return None;
                     };
+                    match self.view {
+                        RequestExecutorView::RequestBody => match ch {
+                            'H' => {
+                                self.view = RequestExecutorView::Headers;
+                                return Some(WidgetCommand::Clear {
+                                    is_header_map_empty: self.headers.is_empty(),
+                                });
+                            }
+                            _ => {}
+                        },
+                        RequestExecutorView::Headers => {
+                            match ch {
+                                'B' => {
+                                    self.view = RequestExecutorView::RequestBody;
+
+                                    return Some(WidgetCommand::Clear {
+                                        is_header_map_empty: self.headers.is_empty(),
+                                    });
+                                }
+                                _ => {}
+                            };
+                        }
+                    }
                 }
                 _ => {}
             },
-            crossterm::event::Event::Mouse(_) => {}
-            crossterm::event::Event::Paste(_) => {}
-            crossterm::event::Event::Resize(_, _) => {}
+            _ => {}
         }
 
         None
@@ -396,9 +472,11 @@ impl CurlmanWidget for RequestExecutor {
     fn toggle_selected(&mut self) {
         self.selected = !self.selected;
         if self.selected {
-            self.block = Block::bordered().border_style(Style::new().red());
+            self.block = get_round_bordered_box()
+                .border_style(Style::new().red())
+                .title("Executor");
         } else {
-            self.block = Block::bordered();
+            self.block = get_round_bordered_box().title("Executor");
         }
     }
 
@@ -526,7 +604,7 @@ impl JsonFormatter {
 
 mod tests {
     use super::JsonFormatter;
-    use crate::{editor::colors::get_default_output_colorscheme, parser::parse_json_editor};
+    use crate::editor::colors::get_default_output_colorscheme;
     use jq_sys::{jq_init, jq_teardown};
 
     #[test]

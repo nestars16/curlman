@@ -1,4 +1,5 @@
 use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
+use arboard::Clipboard;
 use colors::{get_default_editor_colorscheme, EditorColorscheme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -23,10 +24,26 @@ pub mod widget_common {
 
     use super::{CursorMovement, WidgetCommand};
 
-    pub fn adjust_viewport(editor_height: i32, top_row: i32, current_row: i32) -> Option<u16> {
-        let row_pos_in_viewport = top_row + editor_height - current_row;
+    pub fn adjust_viewport(
+        editor_height: i32,
+        editor_width: u16,
+        top_row: i32,
+        current_row: i32,
+        lines: &Vec<String>,
+    ) -> Option<u16> {
+        if editor_width == 0 {
+            return None;
+        }
 
-        if row_pos_in_viewport <= 2 {
+        let overflow_lines = lines[..(current_row as usize)]
+            .iter()
+            .filter(|l| l.len() > editor_width as usize)
+            .map(|l| l.len().div_ceil(editor_width as usize) - 1)
+            .sum::<usize>() as i32;
+
+        let row_pos_in_viewport = top_row + editor_height - current_row - overflow_lines;
+
+        if row_pos_in_viewport <= 0 {
             Some((top_row + 1) as u16)
         } else if row_pos_in_viewport >= editor_height {
             Some(current_row as u16)
@@ -123,8 +140,10 @@ pub mod widget_common {
                 let split_val = editor_col - *current_col;
                 let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
                 spans.push(Span::raw(before_cursor).fg(color));
+
                 let (cursor_char, rest_of_span) =
                     (&at_and_before_cursor[..1], &at_and_before_cursor[1..]);
+
                 spans.push(Span::raw(cursor_char).fg(color).reversed());
                 spans.push(Span::raw(rest_of_span).fg(color));
             }
@@ -273,6 +292,15 @@ pub enum VimMode {
     Insert,
 }
 
+impl VimMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VimMode::Normal => "NORMAL",
+            VimMode::Insert => "INSERT",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum VimState {
     AwaitingFirstInput,
@@ -299,6 +327,7 @@ pub enum VimMotion {
     Move(CursorMovement),
     InsertNewLineDown,
     Append,
+    PasteClipboard,
     Insert,
     Delete(CursorMovement),
 }
@@ -349,12 +378,14 @@ impl TryFrom<char> for VimMotion {
         match value {
             'i' => Ok(Self::Insert),
             'a' => Ok(Self::Append),
+            'p' => Ok(Self::PasteClipboard),
             'k' => Ok(Self::Move(CursorMovement::Up)),
             'j' => Ok(Self::Move(CursorMovement::Down)),
             'h' => Ok(Self::Move(CursorMovement::Left)),
             'l' => Ok(Self::Move(CursorMovement::Right)),
             'o' => Ok(Self::InsertNewLineDown),
             '0' => Ok(Self::Move(CursorMovement::UntilStartOfLine)),
+            'G' => Ok(Self::Move(CursorMovement::UntilEndOfBuffer)),
             '$' => Ok(Self::Move(CursorMovement::UntilEndOfLine)),
             'x' => Ok(Self::Delete(CursorMovement::Right)),
             _ => Err(()),
@@ -371,6 +402,7 @@ impl TryFrom<[char; 3]> for VimMotion {
             ['d', 'f', ' '] => Err(()),
             ['d', 'f', third] => Ok(Self::Delete(CursorMovement::Until(third))),
             ['y', 'f', ' '] => Err(()),
+            ['g', 'g', ' '] => Ok(Self::Move(CursorMovement::UntilStartOfBuffer)),
             _ => Err(()),
         }
     }
@@ -413,6 +445,7 @@ pub struct Editor<'editor> {
     row: usize,
     top_row: u16,
     editor_height: AtomicU16,
+    editor_width: AtomicU16,
     pub lines: Vec<String>,
     colorscheme: EditorColorscheme,
     block: Block<'editor>,
@@ -424,7 +457,9 @@ pub struct Editor<'editor> {
 impl<'editor> Editor<'editor> {
     pub fn new(start_state: Vec<String>) -> Self {
         Self {
-            block: Block::bordered().border_style(Style::new().red()),
+            block: get_round_bordered_box()
+                .border_style(Style::new().red())
+                .title("Editor"),
             tab_len: 4,
             current_mode: EditorMode::Vim {
                 mode: VimMode::Normal,
@@ -442,6 +477,7 @@ impl<'editor> Editor<'editor> {
             colorscheme: get_default_editor_colorscheme(),
             top_row: 0,
             editor_height: AtomicU16::new(0),
+            editor_width: AtomicU16::new(0),
         }
     }
 
@@ -618,21 +654,60 @@ impl<'editor> Editor<'editor> {
                 self.switch_to_insert_mode();
             }
             VimMotion::Delete(vim_operator) => match vim_operator {
-                CursorMovement::Up => {}
-                CursorMovement::Down => {}
-                CursorMovement::Left => {}
                 CursorMovement::Right => {
                     self.backspace_delete();
                 }
-                CursorMovement::Until(char) => {}
-                CursorMovement::Whole => {}
-                CursorMovement::UntilEndOfLine => {}
-                CursorMovement::UntilStartOfLine => {}
+                CursorMovement::Until(char) => {
+                    let current_line = &self.lines[self.row];
+                    let char_idx = current_line.find(char);
+                    if let Some(idx) = char_idx {
+                        self.lines[self.row].drain(self.col..idx);
+                    }
+                }
+                CursorMovement::Whole => {
+                    self.lines.remove(self.row);
+                    if self.lines.is_empty() {
+                        self.lines.push(String::new());
+                        self.col = 0;
+                        self.row = 0;
+                    } else if self.row >= self.lines.len() {
+                        self.row = self.lines.len() - 1;
+                    }
+                }
+                CursorMovement::UntilEndOfLine => {
+                    self.lines[self.row].drain(self.col..);
+                }
+                CursorMovement::UntilStartOfLine => {
+                    self.lines[self.row].drain(0..self.col);
+                }
                 CursorMovement::UntilStartOfBuffer => {}
                 CursorMovement::UntilEndOfBuffer => {}
+                CursorMovement::Up => {}
+                CursorMovement::Down => {}
+                CursorMovement::Left => {}
             },
-            VimMotion::InsertNewLineDown => {}
-            _ => {}
+            VimMotion::InsertNewLineDown => {
+                self.move_cursor(CursorMovement::UntilEndOfLine);
+                self.insert_newline();
+                self.switch_to_insert_mode();
+            }
+            VimMotion::PasteClipboard => {
+                let clipboard_res = Clipboard::new();
+                match clipboard_res {
+                    Ok(mut clipboard) => {
+                        if let Ok(text) = clipboard.get_text() {
+                            for ch in text.replace("\r\n", "\n").chars() {
+                                self.insert_char(ch);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        for ch in format!("Clipboard not supported : {e:?}").chars() {
+                            self.insert_char(ch);
+                        }
+                    }
+                };
+            }
         }
     }
 
@@ -652,6 +727,7 @@ impl<'editor> Editor<'editor> {
                 VimState::WritingCommand => {
                     state.clear();
                 }
+                VimState::AwaitingOperatorOperand => state.clear(),
                 _ => {}
             },
             KeyEvent {
@@ -820,10 +896,14 @@ impl<'editor> Editor<'editor> {
             .editor_height
             .load(std::sync::atomic::Ordering::Relaxed);
 
+        let editor_width_val = self.editor_width.load(std::sync::atomic::Ordering::Relaxed);
+
         if let Some(new_top_row) = widget_common::adjust_viewport(
             editor_height_val as i32,
+            editor_width_val,
             self.top_row as i32,
             self.row as i32,
+            &self.lines,
         ) {
             self.top_row = new_top_row
         }
@@ -877,6 +957,9 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         self.editor_height
             .store(editor_area.height, std::sync::atomic::Ordering::Relaxed);
 
+        self.editor_width
+            .store(editor_area.width, std::sync::atomic::Ordering::Relaxed);
+
         let command_bar_area = Rect {
             x: text_area.x,
             y: text_area.y + editor_area_height, // Position immediately below the editor area
@@ -887,7 +970,10 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         let inner_editor_content = Paragraph::new(self.get_editor_text(editor_area));
 
         inner_editor_content.render(editor_area, buf);
-        let EditorMode::Vim { ref state, .. } = self.current_mode;
+        let EditorMode::Vim {
+            ref state,
+            ref mode,
+        } = self.current_mode;
         const MOTION_BUFFER_RENDER_LEN: u16 = 16;
 
         let status_bar_str = if matches!(state.current_state, VimState::WritingCommand) {
@@ -895,24 +981,31 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         } else {
             let number_of_spaces = command_bar_area
                 .width
-                .checked_sub(state.repeat_n.len() as u16 + MOTION_BUFFER_RENDER_LEN)
+                .checked_sub(
+                    state.repeat_n.len() as u16
+                        + MOTION_BUFFER_RENDER_LEN
+                        + mode.as_str().len() as u16
+                        + 1,
+                )
                 .unwrap_or(0);
 
             format!(
-                "{}{}{:?}",
+                " {}{}{}{:?}",
+                mode.as_str(),
                 " ".repeat(number_of_spaces as usize),
                 state.repeat_n,
                 state.motion_buffer
             )
         };
 
-        let status_bar_content = Line::from(status_bar_str);
+        let status_bar_content = Line::from(status_bar_str).bold();
         status_bar_content.render(command_bar_area, buf);
     }
 }
 
 #[derive(Debug)]
 pub enum WidgetCommand {
+    Clear { is_header_map_empty: bool },
     MoveWidgetSelection { direction: keys::Direction },
     Save { text: String },
     MoveRequestSelection { new_idx: usize },
@@ -939,9 +1032,11 @@ impl<'editor> CurlmanWidget for Editor<'editor> {
         self.selected = !self.selected;
 
         if self.selected {
-            self.block = Block::bordered().border_style(Style::new().red());
+            self.block = get_round_bordered_box()
+                .border_style(Style::new().red())
+                .title("Editor");
         } else {
-            self.block = Block::bordered();
+            self.block = get_round_bordered_box().title("Editor");
         }
     }
 
@@ -982,7 +1077,7 @@ impl<'browser> StatefulWidgetRef for RequestBrowser<'browser> {
         .highlight_symbol("-> ")
         .highlight_style(Style::new().reversed());
 
-        requests.render_ref(area, buf, &mut state.list_state);
+        requests.render_ref(area, buf, &mut state.request_list_state);
     }
 }
 
@@ -1037,7 +1132,7 @@ impl<'browser> InputListener for RequestBrowser<'browser> {
 impl<'browser> Default for RequestBrowser<'browser> {
     fn default() -> Self {
         RequestBrowser {
-            block: get_round_bordered_box(),
+            block: get_round_bordered_box().title("Request Selector"),
             requests: None,
             selected: false,
             selected_request_idx: None,
@@ -1059,9 +1154,11 @@ impl<'browser> CurlmanWidget for RequestBrowser<'browser> {
     fn toggle_selected(&mut self) {
         self.selected = !self.selected;
         if self.selected {
-            self.block = Block::bordered().border_style(Style::new().red());
+            self.block = get_round_bordered_box()
+                .border_style(Style::new().red())
+                .title("Request Selector");
         } else {
-            self.block = Block::bordered();
+            self.block = get_round_bordered_box().title("Request Selector");
         }
     }
     fn update_shared_state(&mut self, new_state: &AppState) -> Result<(), Error> {

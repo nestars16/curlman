@@ -28,8 +28,9 @@ use types::{DirectionArray, LayoutParent, Pane, PaneWidget, RequestInfo, TargetI
 
 #[derive(Debug)]
 pub struct AppState {
-    pub list_state: ListState,
+    pub request_list_state: ListState,
     pub requests: Vec<RequestInfo>,
+    pub header_list_state: tui_widget_list::ListState,
     pub selected_request_idx: Option<usize>,
 }
 
@@ -54,12 +55,10 @@ impl Drop for App {
 }
 
 //TODO
-//correct error handling and ui improvements
-//fix vim keybinds
-//json filtering
-//CONSIDER CURL REDIRECT FLAG?
-//consider curl basic auth?
-//file uploads curl
+//Add a way to display recieved request headers
+//Add yanking and visual mode to vim and complete deletes
+//Add jq json filtering
+//curl file uploads, basic auth and auth redirect
 
 pub mod keys {
     pub const UP: char = 'k';
@@ -151,7 +150,7 @@ impl App {
 
         self.state.requests = requests;
         self.state
-            .list_state
+            .request_list_state
             .select(self.state.selected_request_idx);
 
         for (_, pane) in &mut self.panes {
@@ -287,7 +286,7 @@ impl App {
                     }
                     WidgetCommand::MoveRequestSelection { new_idx } => {
                         self.state.selected_request_idx = Some(new_idx);
-                        self.state.list_state.select(Some(new_idx));
+                        self.state.request_list_state.select(Some(new_idx));
 
                         for (_, pane) in &mut self.panes {
                             for widget in &mut pane.widgets {
@@ -297,6 +296,15 @@ impl App {
                     }
                     WidgetCommand::Quit => {
                         return Ok(());
+                    }
+                    WidgetCommand::Clear {
+                        is_header_map_empty,
+                    } => {
+                        if !is_header_map_empty {
+                            self.state.header_list_state.select(Some(0));
+                        }
+
+                        term.clear()?;
                     }
                 }
             };
@@ -354,7 +362,7 @@ fn main() -> Result<(), crate::error::Error> {
 
     let parent_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)]);
+        .constraints([Constraint::Fill(1), Constraint::Percentage(85)]);
 
     let inner_layout = Layout::default()
         .direction(Direction::Horizontal)
@@ -397,9 +405,10 @@ fn main() -> Result<(), crate::error::Error> {
     ];
 
     let initial_state = AppState {
-        list_state: ListState::default().with_selected(initally_selected_request),
+        request_list_state: ListState::default().with_selected(initally_selected_request),
         requests: initial_requests_vec.unwrap_or(Vec::new()),
         selected_request_idx: initally_selected_request,
+        header_list_state: tui_widget_list::ListState::default(),
     };
 
     for pane in &mut panes {
