@@ -751,6 +751,7 @@ impl<'editor> Editor<'editor> {
 
                     let Ok(command) = written_command else {
                         state.current_state = VimState::AwaitingFirstInput;
+                        state.command_buff.clear();
                         break 'exec_command;
                     };
 
@@ -1007,6 +1008,7 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
 pub enum WidgetCommand {
     Clear { is_header_map_empty: bool },
     MoveWidgetSelection { direction: keys::Direction },
+    MoveHeaderViewport { direction: keys::Direction },
     Save { text: String },
     MoveRequestSelection { new_idx: usize },
     Quit,

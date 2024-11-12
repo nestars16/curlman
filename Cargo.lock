@@ -258,7 +258,6 @@ dependencies = [
  "jq-sys",
  "nom",
  "ratatui",
- "tui-widget-list",
  "url",
 ]
 
@@ -972,15 +971,6 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
-
-[[package]]
-name = "tui-widget-list"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd80265ccaaad37d8e315c2ca1ba40dd30bced081ba4fbe22fa0584fd9c1ca3f"
-dependencies = [
- "ratatui",
-]
 
 [[package]]
 name = "unicode-bidi"

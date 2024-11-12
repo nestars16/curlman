@@ -4,9 +4,9 @@ use curl::multi;
 use http::Method;
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, tag, take, take_till, take_while, take_while1},
+    bytes::complete::{escaped, is_not, tag, take, take_till, take_while, take_while1},
     character::complete::{char, multispace0, multispace1, none_of, one_of},
-    combinator::{map, map_res, recognize},
+    combinator::{map, map_res, opt, recognize},
     error::{Error, VerboseError, VerboseErrorKind},
     multi::{many1, separated_list0},
     number::complete::recognize_float,
@@ -28,15 +28,12 @@ fn string_parser_global(input: &str) -> IResult<&str, &str> {
         escaped(none_of("\\\""), '\\', take(1usize)),
         tag("\""),
     ));
-
     let single_quoted = tuple((
         tag::<_, _, Error<&str>>("\'"),
         escaped(none_of("\\\'"), '\\', take(1usize)),
         tag("\'"),
     ));
-
     let mut string_parser = recognize(alt((double_quoted, single_quoted)));
-
     string_parser(input)
 }
 
@@ -189,16 +186,17 @@ pub fn parse_curlman_request_file(
 }
 
 #[derive(Debug)]
-enum RequestParserState {
+enum RequestParserState<'a> {
     ExpectingCurl,
     ExpectingUrl,
     ExpectingParamKey,
-    ExpectingParamValue,
+    ExpectingParamValueStart,
+    ExpectingParamValueEnd(&'a str),
 }
 
 fn parse_curlman_editor_line<'a, 'b>(
     input: &'a str,
-    parser_state: &'b mut RequestParserState,
+    parser_state: &'b mut RequestParserState<'a>,
 ) -> IResult<&'a str, Vec<Token<'a>>> {
     let mut line_tokens = Vec::new();
     match parser_state {
@@ -274,27 +272,86 @@ fn parse_curlman_editor_line<'a, 'b>(
             if !space.is_empty() {
                 line_tokens.push(Token::Whitespace(space));
             }
-            *parser_state = RequestParserState::ExpectingParamValue;
+            *parser_state = RequestParserState::ExpectingParamValueStart;
             return Ok((input, line_tokens));
         }
-        RequestParserState::ExpectingParamValue => {
+        RequestParserState::ExpectingParamValueStart => {
             let (input, space) = multispace0(input)?;
             if !space.is_empty() {
                 line_tokens.push(Token::Whitespace(space));
             }
+            let tag_parser =
+                take_while1::<_, _, Error<&str>>(|ch: char| ch.is_ascii_alphanumeric());
 
-            let tag_parser = take_while1(|ch: char| ch.is_ascii_alphanumeric());
-            let mut param_value_parser = alt((string_parser_global, tag_parser));
-            let (input, param_value) = param_value_parser(input)?;
-            line_tokens.push(Token::ParamValue(param_value));
-            let (input, space) = multispace0(input)?;
-            if !space.is_empty() {
-                line_tokens.push(Token::Whitespace(space));
-            }
-            *parser_state = RequestParserState::ExpectingParamKey;
-            return Ok((input, line_tokens));
+            let param_value_res = tag_parser(input);
+
+            return match param_value_res {
+                Ok((input, param_value)) => {
+                    line_tokens.push(Token::ParamValue(param_value));
+                    let (input, space) = multispace0(input)?;
+                    if !space.is_empty() {
+                        line_tokens.push(Token::Whitespace(space));
+                    }
+                    *parser_state = RequestParserState::ExpectingParamKey;
+                    Ok((input, line_tokens))
+                }
+                Err(_) => {
+                    let string_parse_res = string_parser_global(input);
+                    match string_parse_res {
+                        Ok((input, string)) => {
+                            line_tokens.push(Token::ParamValue(string));
+                            *parser_state = RequestParserState::ExpectingParamKey;
+                            Ok((input, line_tokens))
+                        }
+                        Err(_) => {
+                            let (input, string_start) = alt((tag("\'"), tag("\"")))(input)?;
+                            line_tokens.push(Token::ParamValue(string_start));
+                            let (input, space) = multispace0(input)?;
+                            if !space.is_empty() {
+                                line_tokens.push(Token::Whitespace(space));
+                            }
+                            *parser_state =
+                                RequestParserState::ExpectingParamValueEnd(string_start);
+
+                            Ok((input, line_tokens))
+                        }
+                    }
+                }
+            };
         }
-    };
+        RequestParserState::ExpectingParamValueEnd(ref delimiter) => {
+            let line_consume_res = is_not::<_, _, nom::error::Error<&str>>(*delimiter)(input);
+
+            match line_consume_res {
+                Ok((input, line)) => {
+                    line_tokens.push(Token::ParamValue(line));
+
+                    let end_string_res = tag::<_, _, nom::error::Error<&str>>(*delimiter)(input);
+
+                    match end_string_res {
+                        Ok((input, end)) => {
+                            line_tokens.push(Token::ParamValue(end));
+                            *parser_state = RequestParserState::ExpectingParamKey;
+                            Ok((input, line_tokens))
+                        }
+                        Err(_) => Ok((input, line_tokens)),
+                    }
+                }
+                Err(_) => {
+                    let end_string_res = tag::<_, _, nom::error::Error<&str>>(*delimiter)(input);
+
+                    match end_string_res {
+                        Ok((input, end)) => {
+                            line_tokens.push(Token::ParamValue(end));
+                            *parser_state = RequestParserState::ExpectingParamKey;
+                            Ok((input, line_tokens))
+                        }
+                        Err(_) => Ok((input, line_tokens)),
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn parse_curlman_editor<'a>(input: &'a Vec<String>) -> Vec<Vec<Token<'a>>> {

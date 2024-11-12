@@ -1,7 +1,8 @@
+use nom::error::context;
 use ratatui::{
     style::{Color, Modifier},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, WidgetRef, Wrap},
+    widgets::{Clear, List, Paragraph, WidgetRef, Wrap},
 };
 use std::{
     collections::HashMap,
@@ -9,7 +10,6 @@ use std::{
     io::{Cursor, Read},
     sync::atomic::{AtomicU16, Ordering},
 };
-use tui_widget_list::{ListBuilder, ListState, ListView};
 
 use crate::{
     editor::{
@@ -20,6 +20,7 @@ use crate::{
         CurlmanWidget, CursorMovement, InputListener, WidgetCommand,
     },
     error::Error,
+    keys,
     parser::{parse_json_editor, JsonToken},
     types::RequestInfo,
     AppState,
@@ -57,7 +58,6 @@ pub struct RequestExecutor {
     row: usize,
     col: usize,
     top_row: u16,
-    header_list_state: ListState,
     executor_height: AtomicU16,
     executor_width: AtomicU16,
     json_formatter: JsonFormatter,
@@ -91,7 +91,6 @@ impl RequestExecutor {
             col: 0,
             body_cursor: None,
             error: None,
-            header_list_state: ListState::default(),
         }
     }
 
@@ -268,6 +267,7 @@ impl StatefulWidgetRef for RequestExecutor {
     fn render_ref(&self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         self.executor_width.store(area.width, Ordering::Relaxed);
         self.executor_height.store(area.height, Ordering::Relaxed);
+
         let text_area = self.block.inner(area);
         self.block.clone().render(area, buf);
 
@@ -321,41 +321,85 @@ impl StatefulWidgetRef for RequestExecutor {
                 },
             },
             RequestExecutorView::Headers => {
-                let request_headers = self
-                    .headers
-                    .iter()
-                    .map(|(k, v)| {
-                        let space = 1 + v.len().div_ceil(area.width as usize);
-                        (
-                            Paragraph::new(vec![Line::from_iter(
-                                [
-                                    Span::raw(k.as_str().to_string()).bold(),
-                                    Span::raw(": ".to_string()).bold(),
-                                    Span::raw(v.to_string()).italic(),
-                                ]
-                                .into_iter(),
-                            )])
-                            .wrap(Wrap { trim: true })
-                            .left_aligned(),
-                            if space > 2 { space } else { 1 },
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let area_width = area.width.checked_sub(1);
 
-                let header_count = request_headers.len();
+                let Some(area_width) = area_width else {
+                    return;
+                };
 
-                let builder = ListBuilder::new(move |context| {
-                    let (mut paragraph, height) = request_headers[context.index].clone();
+                let request_headers = self.headers.iter().map(|(k, v)| {
+                    let separator = ": ";
+                    let separator_len = separator.len();
+                    let key_and_separator_len = k.as_str().len() + separator_len;
+                    let line_length = key_and_separator_len + v.len();
+                    if line_length > area_width as usize {
+                        let mut text_lines = Vec::new();
 
-                    if context.is_selected {
-                        paragraph = paragraph.reversed();
+                        let space_left_for_value =
+                            (area_width as usize).checked_sub(key_and_separator_len);
+
+                        let remaining_width = match space_left_for_value {
+                            Some(remaining) => remaining,
+                            None => {
+                                let mut remaining_key_str = k.as_str();
+
+                                while remaining_key_str.len() > area_width as usize {
+                                    text_lines.push(Line::from(&k.as_str()[..area_width as usize]));
+                                    remaining_key_str = &remaining_key_str[area_width as usize..];
+                                }
+
+                                let mut remaining_space_in_line =
+                                    area_width as usize - remaining_key_str.len();
+
+                                if remaining_space_in_line > separator_len {
+                                    text_lines.push(Line::from_iter(
+                                        [remaining_key_str, separator].into_iter(),
+                                    ));
+                                    remaining_space_in_line -= separator_len;
+                                } else {
+                                    text_lines.push(Line::from_iter(
+                                        [remaining_key_str, &separator[..remaining_space_in_line]]
+                                            .into_iter(),
+                                    ));
+
+                                    let missing_separator_chunk =
+                                        &separator[remaining_space_in_line..];
+                                    text_lines.push(Line::from_iter(
+                                        [missing_separator_chunk].into_iter(),
+                                    ));
+                                    remaining_space_in_line =
+                                        area_width as usize - missing_separator_chunk.len();
+                                }
+                                remaining_space_in_line
+                            }
+                        };
+
+                        text_lines.push(Line::from_iter(
+                            [k.as_str(), separator, &v[..remaining_width]].into_iter(),
+                        ));
+                        let mut remaining_value_str = &v[remaining_width..];
+                        while remaining_value_str.len() > area_width as usize {
+                            text_lines
+                                .push(Line::from(&remaining_value_str[..area_width as usize]));
+
+                            remaining_value_str = &remaining_value_str[area_width as usize..]
+                        }
+
+                        text_lines.push(Line::from(remaining_value_str));
+                        Text::from(text_lines)
+                    } else {
+                        Text::from(Line::from_iter(Line::from_iter(
+                            [k.as_str(), ": ", v.as_str()].into_iter(),
+                        )))
                     }
-
-                    (paragraph, height as u16)
                 });
 
-                let list = ListView::new(builder, header_count);
-                list.render(text_area, buf, &mut state.header_list_state);
+                StatefulWidgetRef::render_ref(
+                    &List::from_iter(request_headers).highlight_symbol(">"),
+                    text_area,
+                    buf,
+                    &mut state.header_list_state,
+                );
             }
         }
     }
@@ -449,10 +493,16 @@ impl InputListener for RequestExecutor {
                             match ch {
                                 'B' => {
                                     self.view = RequestExecutorView::RequestBody;
-
                                     return Some(WidgetCommand::Clear {
                                         is_header_map_empty: self.headers.is_empty(),
                                     });
+                                }
+                                keys::UP | keys::DOWN => {
+                                    return Some(WidgetCommand::MoveHeaderViewport {
+                                        direction: ch
+                                            .try_into()
+                                            .expect("char is guaranteed to be a valid direction"),
+                                    })
                                 }
                                 _ => {}
                             };

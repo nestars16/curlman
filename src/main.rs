@@ -29,8 +29,8 @@ use types::{DirectionArray, LayoutParent, Pane, PaneWidget, RequestInfo, TargetI
 #[derive(Debug)]
 pub struct AppState {
     pub request_list_state: ListState,
+    pub header_list_state: ListState,
     pub requests: Vec<RequestInfo>,
-    pub header_list_state: tui_widget_list::ListState,
     pub selected_request_idx: Option<usize>,
 }
 
@@ -55,12 +55,14 @@ impl Drop for App {
 }
 
 //TODO
-//Add a way to display recieved request headers
+//Fix moving headers
+//Add highlighting for html
 //Add yanking and visual mode to vim and complete deletes
 //Add jq json filtering
 //curl file uploads, basic auth and auth redirect
 
 pub mod keys {
+
     pub const UP: char = 'k';
     pub const DOWN: char = 'j';
     pub const LEFT: char = 'h';
@@ -72,6 +74,20 @@ pub mod keys {
         Down,
         Left,
         Right,
+    }
+
+    impl TryFrom<char> for Direction {
+        type Error = ();
+
+        fn try_from(value: char) -> Result<Self, Self::Error> {
+            match value {
+                'j' => Ok(Self::Down),
+                'k' => Ok(Self::Up),
+                'h' => Ok(Self::Left),
+                'l' => Ok(Self::Right),
+                _ => Err(()),
+            }
+        }
     }
 
     impl From<Direction> for usize {
@@ -221,6 +237,7 @@ impl App {
             })?;
 
             let event = event::read()?;
+
             let selected_pane = self
                 .panes
                 .get_mut(&self.selected_pane_id)
@@ -287,7 +304,6 @@ impl App {
                     WidgetCommand::MoveRequestSelection { new_idx } => {
                         self.state.selected_request_idx = Some(new_idx);
                         self.state.request_list_state.select(Some(new_idx));
-
                         for (_, pane) in &mut self.panes {
                             for widget in &mut pane.widgets {
                                 widget.widget.update_shared_state(&self.state)?;
@@ -305,6 +321,17 @@ impl App {
                         }
 
                         term.clear()?;
+                    }
+                    WidgetCommand::MoveHeaderViewport { direction } => {
+                        match direction {
+                            keys::Direction::Up => {
+                                self.state.header_list_state.select_previous();
+                            }
+                            keys::Direction::Down => {
+                                self.state.header_list_state.select_next();
+                            }
+                            _ => {}
+                        };
                     }
                 }
             };
@@ -408,7 +435,7 @@ fn main() -> Result<(), crate::error::Error> {
         request_list_state: ListState::default().with_selected(initally_selected_request),
         requests: initial_requests_vec.unwrap_or(Vec::new()),
         selected_request_idx: initally_selected_request,
-        header_list_state: tui_widget_list::ListState::default(),
+        header_list_state: ListState::default(),
     };
 
     for pane in &mut panes {
