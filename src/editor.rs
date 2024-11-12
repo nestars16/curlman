@@ -42,6 +42,7 @@ pub mod widget_common {
             .sum::<usize>() as i32;
 
         let row_pos_in_viewport = top_row + editor_height - current_row - overflow_lines;
+        dbg!(row_pos_in_viewport);
 
         if row_pos_in_viewport <= 0 {
             Some((top_row + 1) as u16)
@@ -87,6 +88,7 @@ pub mod widget_common {
         fn fit_col(col: usize, line: &str) -> usize {
             std::cmp::min(col, line.chars().count())
         }
+
         match operator {
             CursorMovement::Right if current_col >= lines[current_row].chars().count() => {
                 (current_row + 1 < lines.len()).then(|| (current_row + 1, 0))
@@ -131,6 +133,7 @@ pub mod widget_common {
         spans: &mut Vec<Span<'widget>>,
     ) {
         let will_overflow = *current_col + text.len() > area_width as usize;
+
         match (cursor_has_to_be_set, will_overflow) {
             (false, false) => {
                 spans.push(Span::raw(text).fg(color));
@@ -141,11 +144,15 @@ pub mod widget_common {
                 let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
                 spans.push(Span::raw(before_cursor).fg(color));
 
-                let (cursor_char, rest_of_span) =
-                    (&at_and_before_cursor[..1], &at_and_before_cursor[1..]);
+                let string_segments =
+                    (at_and_before_cursor.get(..1), at_and_before_cursor.get(1..));
 
-                spans.push(Span::raw(cursor_char).fg(color).reversed());
-                spans.push(Span::raw(rest_of_span).fg(color));
+                if let (Some(cursor_char), Some(rest_of_span)) = string_segments {
+                    spans.push(Span::raw(cursor_char).fg(color).reversed());
+                    spans.push(Span::raw(rest_of_span).fg(color));
+                } else {
+                    spans.push(Span::raw(" ").reversed());
+                }
             }
             (false, true) => {
                 let remaining_space_in_line =
@@ -1008,7 +1015,6 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
 pub enum WidgetCommand {
     Clear { is_header_map_empty: bool },
     MoveWidgetSelection { direction: keys::Direction },
-    MoveHeaderViewport { direction: keys::Direction },
     Save { text: String },
     MoveRequestSelection { new_idx: usize },
     Quit,

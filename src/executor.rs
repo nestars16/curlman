@@ -1,12 +1,12 @@
-use nom::error::context;
 use ratatui::{
     style::{Color, Modifier},
     text::{Line, Span},
-    widgets::{Clear, List, Paragraph, WidgetRef, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
+    fmt::Write,
     io::{Cursor, Read},
     sync::atomic::{AtomicU16, Ordering},
 };
@@ -52,6 +52,7 @@ enum RequestExecutorView {
 }
 
 pub struct RequestExecutor {
+    header_paragraph_scroll: u16,
     block: Block<'static>,
     selected: bool,
     body_cursor: Option<Cursor<Vec<u8>>>,
@@ -73,6 +74,7 @@ pub struct RequestExecutor {
 impl RequestExecutor {
     pub fn new() -> Self {
         Self {
+            header_paragraph_scroll: 0,
             view: RequestExecutorView::RequestBody,
             block: editor::get_round_bordered_box().title("Executor"),
             selected: false,
@@ -232,8 +234,8 @@ impl RequestExecutor {
     }
 
     fn get_raw_editor_representation(&self, area: Rect) -> Text {
-        let mut is_cursor_set = false;
         let mut current_col = 0;
+        let mut is_cursor_set = false;
         let mut lines = Vec::new();
         let mut spans = Vec::new();
 
@@ -250,6 +252,8 @@ impl RequestExecutor {
                 &mut lines,
                 &mut spans,
             );
+
+            lines.push(Line::from(std::mem::take(&mut spans)));
         }
 
         Text::from(lines)
@@ -321,85 +325,17 @@ impl StatefulWidgetRef for RequestExecutor {
                 },
             },
             RequestExecutorView::Headers => {
-                let area_width = area.width.checked_sub(1);
+                let mut paragraph_buf = String::new();
 
-                let Some(area_width) = area_width else {
-                    return;
-                };
-
-                let request_headers = self.headers.iter().map(|(k, v)| {
-                    let separator = ": ";
-                    let separator_len = separator.len();
-                    let key_and_separator_len = k.as_str().len() + separator_len;
-                    let line_length = key_and_separator_len + v.len();
-                    if line_length > area_width as usize {
-                        let mut text_lines = Vec::new();
-
-                        let space_left_for_value =
-                            (area_width as usize).checked_sub(key_and_separator_len);
-
-                        let remaining_width = match space_left_for_value {
-                            Some(remaining) => remaining,
-                            None => {
-                                let mut remaining_key_str = k.as_str();
-
-                                while remaining_key_str.len() > area_width as usize {
-                                    text_lines.push(Line::from(&k.as_str()[..area_width as usize]));
-                                    remaining_key_str = &remaining_key_str[area_width as usize..];
-                                }
-
-                                let mut remaining_space_in_line =
-                                    area_width as usize - remaining_key_str.len();
-
-                                if remaining_space_in_line > separator_len {
-                                    text_lines.push(Line::from_iter(
-                                        [remaining_key_str, separator].into_iter(),
-                                    ));
-                                    remaining_space_in_line -= separator_len;
-                                } else {
-                                    text_lines.push(Line::from_iter(
-                                        [remaining_key_str, &separator[..remaining_space_in_line]]
-                                            .into_iter(),
-                                    ));
-
-                                    let missing_separator_chunk =
-                                        &separator[remaining_space_in_line..];
-                                    text_lines.push(Line::from_iter(
-                                        [missing_separator_chunk].into_iter(),
-                                    ));
-                                    remaining_space_in_line =
-                                        area_width as usize - missing_separator_chunk.len();
-                                }
-                                remaining_space_in_line
-                            }
-                        };
-
-                        text_lines.push(Line::from_iter(
-                            [k.as_str(), separator, &v[..remaining_width]].into_iter(),
-                        ));
-                        let mut remaining_value_str = &v[remaining_width..];
-                        while remaining_value_str.len() > area_width as usize {
-                            text_lines
-                                .push(Line::from(&remaining_value_str[..area_width as usize]));
-
-                            remaining_value_str = &remaining_value_str[area_width as usize..]
-                        }
-
-                        text_lines.push(Line::from(remaining_value_str));
-                        Text::from(text_lines)
-                    } else {
-                        Text::from(Line::from_iter(Line::from_iter(
-                            [k.as_str(), ": ", v.as_str()].into_iter(),
-                        )))
-                    }
+                self.headers.iter().for_each(|(k, v)| {
+                    write!(&mut paragraph_buf, "{k}: {v}")
+                        .expect("Paragraph buffer string couldn't write");
                 });
 
-                StatefulWidgetRef::render_ref(
-                    &List::from_iter(request_headers).highlight_symbol(">"),
-                    text_area,
-                    buf,
-                    &mut state.header_list_state,
-                );
+                Paragraph::new(paragraph_buf)
+                    .wrap(Wrap { trim: true })
+                    .scroll((self.header_paragraph_scroll, 0))
+                    .render(text_area, buf)
             }
         }
     }
@@ -497,12 +433,13 @@ impl InputListener for RequestExecutor {
                                         is_header_map_empty: self.headers.is_empty(),
                                     });
                                 }
-                                keys::UP | keys::DOWN => {
-                                    return Some(WidgetCommand::MoveHeaderViewport {
-                                        direction: ch
-                                            .try_into()
-                                            .expect("char is guaranteed to be a valid direction"),
-                                    })
+                                keys::UP => {
+                                    if self.header_paragraph_scroll >= 1 {
+                                        self.header_paragraph_scroll -= 1;
+                                    }
+                                }
+                                keys::DOWN => {
+                                    self.header_paragraph_scroll += 1;
                                 }
                                 _ => {}
                             };

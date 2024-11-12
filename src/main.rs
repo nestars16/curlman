@@ -29,7 +29,6 @@ use types::{DirectionArray, LayoutParent, Pane, PaneWidget, RequestInfo, TargetI
 #[derive(Debug)]
 pub struct AppState {
     pub request_list_state: ListState,
-    pub header_list_state: ListState,
     pub requests: Vec<RequestInfo>,
     pub selected_request_idx: Option<usize>,
 }
@@ -313,25 +312,8 @@ impl App {
                     WidgetCommand::Quit => {
                         return Ok(());
                     }
-                    WidgetCommand::Clear {
-                        is_header_map_empty,
-                    } => {
-                        if !is_header_map_empty {
-                            self.state.header_list_state.select(Some(0));
-                        }
-
+                    WidgetCommand::Clear { .. } => {
                         term.clear()?;
-                    }
-                    WidgetCommand::MoveHeaderViewport { direction } => {
-                        match direction {
-                            keys::Direction::Up => {
-                                self.state.header_list_state.select_previous();
-                            }
-                            keys::Direction::Down => {
-                                self.state.header_list_state.select_next();
-                            }
-                            _ => {}
-                        };
                     }
                 }
             };
@@ -435,7 +417,6 @@ fn main() -> Result<(), crate::error::Error> {
         request_list_state: ListState::default().with_selected(initally_selected_request),
         requests: initial_requests_vec.unwrap_or(Vec::new()),
         selected_request_idx: initally_selected_request,
-        header_list_state: ListState::default(),
     };
 
     for pane in &mut panes {
