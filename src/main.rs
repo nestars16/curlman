@@ -54,8 +54,7 @@ impl Drop for App {
 }
 
 //TODO
-//Fix moving headers
-//Add highlighting for html
+//FIXME FIX EDITOR ERRORING OUT ON BYTE SLICING
 //Add yanking and visual mode to vim and complete deletes
 //Add jq json filtering
 //curl file uploads, basic auth and auth redirect
@@ -302,6 +301,7 @@ impl App {
                     }
                     WidgetCommand::MoveRequestSelection { new_idx } => {
                         self.state.selected_request_idx = Some(new_idx);
+
                         self.state.request_list_state.select(Some(new_idx));
                         for (_, pane) in &mut self.panes {
                             for widget in &mut pane.widgets {

@@ -16,7 +16,9 @@ use crate::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
         get_round_bordered_box,
-        widget_common::{self, fit_and_process_text_tokens_into_editor_window},
+        widget_common::{
+            self, fit_and_process_text_tokens_into_editor_window, move_widget_selection,
+        },
         CurlmanWidget, CursorMovement, InputListener, WidgetCommand,
     },
     error::Error,
@@ -159,7 +161,6 @@ impl RequestExecutor {
                 };
 
                 self.body_cursor = Some(Cursor::new(body));
-
                 let mut transfer = self.handle.transfer();
 
                 transfer.header_function(|into| {
@@ -188,12 +189,10 @@ impl RequestExecutor {
                         Err(_) => Err(ReadError::Abort),
                     }
                 })?;
-
                 transfer.write_function(|data| {
                     self.output_data.extend_from_slice(data);
                     Ok(data.len())
                 })?;
-
                 transfer.perform().map_err(|e| e.into())
             }
             _ => Err(Error::UnsupportedMethod(req.method.to_string())),
@@ -210,13 +209,30 @@ impl RequestExecutor {
             .load(std::sync::atomic::Ordering::Relaxed);
 
         if let Some(new_top_row) = widget_common::adjust_viewport(
-            editor_height_val as i32,
+            editor_height_val.checked_sub(3).unwrap_or(0) as i32,
             editor_width_val,
             self.top_row as i32,
             self.row as i32,
             &self.editor_representation,
         ) {
             self.top_row = new_top_row
+        }
+    }
+
+    fn move_cursor_or_headers(&mut self, operator: CursorMovement) {
+        match self.view {
+            RequestExecutorView::RequestBody => self.move_cursor(operator),
+            RequestExecutorView::Headers => match operator {
+                CursorMovement::Up => {
+                    if self.header_paragraph_scroll >= 1 {
+                        self.header_paragraph_scroll -= 1;
+                    }
+                }
+                CursorMovement::Down => {
+                    self.header_paragraph_scroll += 1;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -234,25 +250,27 @@ impl RequestExecutor {
     }
 
     fn get_raw_editor_representation(&self, area: Rect) -> Text {
-        let mut current_col = 0;
         let mut is_cursor_set = false;
         let mut lines = Vec::new();
         let mut spans = Vec::new();
-
         for (idx, line) in self.editor_representation.iter().enumerate() {
+            let mut current_col = 0;
             let cursor_has_to_be_set = self.row == idx;
+            if idx < self.top_row as usize || idx >= self.top_row as usize + area.height as usize {
+                continue;
+            }
+
             fit_and_process_text_tokens_into_editor_window(
                 self.col,
                 line,
                 Color::White,
-                area.width,
+                area.width - 2,
                 cursor_has_to_be_set,
                 &mut is_cursor_set,
                 &mut current_col,
                 &mut lines,
                 &mut spans,
             );
-
             lines.push(Line::from(std::mem::take(&mut spans)));
         }
 
@@ -274,7 +292,6 @@ impl StatefulWidgetRef for RequestExecutor {
 
         let text_area = self.block.inner(area);
         self.block.clone().render(area, buf);
-
         if let Some(e) = &self.error {
             Paragraph::new(format!(
                 "{}{}",
@@ -349,19 +366,19 @@ impl InputListener for RequestExecutor {
             crossterm::event::Event::Key(key_event) => match key_event {
                 KeyEvent {
                     code: KeyCode::Up, ..
-                } => self.move_cursor(CursorMovement::Up),
+                } => self.move_cursor_or_headers(CursorMovement::Up),
                 KeyEvent {
                     code: KeyCode::Down,
                     ..
-                } => self.move_cursor(CursorMovement::Down),
+                } => self.move_cursor_or_headers(CursorMovement::Down),
                 KeyEvent {
                     code: KeyCode::Left,
                     ..
-                } => self.move_cursor(CursorMovement::Left),
+                } => self.move_cursor_or_headers(CursorMovement::Left),
                 KeyEvent {
                     code: KeyCode::Right,
                     ..
-                } => self.move_cursor(CursorMovement::Right),
+                } => self.move_cursor_or_headers(CursorMovement::Right),
                 KeyEvent {
                     code: KeyCode::Char(ch),
                     modifiers: KeyModifiers::CONTROL,
@@ -398,11 +415,11 @@ impl InputListener for RequestExecutor {
                                     }
                                     _ => {
                                         self.editor_representation =
-                                            String::from_utf8_lossy(&self.output_data)
+                                            dbg!(String::from_utf8_lossy(&self.output_data)
                                                 .to_string()
                                                 .split('\n')
                                                 .map(|str| str.to_string())
-                                                .collect();
+                                                .collect());
                                     }
                                 },
                                 None => {
@@ -415,6 +432,7 @@ impl InputListener for RequestExecutor {
 
                         return None;
                     };
+
                     match self.view {
                         RequestExecutorView::RequestBody => match ch {
                             'H' => {
@@ -423,6 +441,10 @@ impl InputListener for RequestExecutor {
                                     is_header_map_empty: self.headers.is_empty(),
                                 });
                             }
+                            keys::UP | keys::DOWN | keys::LEFT | keys::RIGHT => self.move_cursor(
+                                ch.try_into()
+                                    .expect("Char is guaranteed to be valid direction"),
+                            ),
                             _ => {}
                         },
                         RequestExecutorView::Headers => {

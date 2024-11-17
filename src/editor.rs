@@ -42,8 +42,6 @@ pub mod widget_common {
             .sum::<usize>() as i32;
 
         let row_pos_in_viewport = top_row + editor_height - current_row - overflow_lines;
-        dbg!(row_pos_in_viewport);
-
         if row_pos_in_viewport <= 0 {
             Some((top_row + 1) as u16)
         } else if row_pos_in_viewport >= editor_height {
@@ -140,8 +138,10 @@ pub mod widget_common {
             }
             (true, false) => {
                 *is_cursor_set = true;
+
                 let split_val = editor_col - *current_col;
                 let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
+
                 spans.push(Span::raw(before_cursor).fg(color));
 
                 let string_segments =
@@ -1120,8 +1120,9 @@ impl<'browser> InputListener for RequestBrowser<'browser> {
                             }
                         }
                         keys::DOWN => {
-                            if *idx < requests.len() {
-                                *idx += 1;
+                            let new_idx = *idx + 1;
+                            if new_idx < requests.len() {
+                                *idx = new_idx;
                                 return Some(WidgetCommand::MoveRequestSelection { new_idx: *idx });
                             }
                         }
