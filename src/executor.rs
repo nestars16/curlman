@@ -17,7 +17,7 @@ use crate::{
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
         get_round_bordered_box,
         widget_common::fit_and_process_text_tokens_into_editor_window,
-        CurlmanWidget, CursorMovement, InputListener, WidgetCommand,
+        CurlmanWidget, CursorMovement, InputListener, VimCommand, VimMotion, WidgetCommand,
     },
     error::Error,
     keys,
@@ -86,7 +86,7 @@ impl<'widget> RequestExecutor<'_> {
         }
     }
 
-    pub fn perform_request(&mut self) -> Result<(), Error> {
+    pub fn perform_curl_request(&mut self) -> Result<(), Error> {
         let Some(req) = self.request.clone() else {
             return Err(Error::InvalidState("No request selected"));
         };
@@ -216,6 +216,32 @@ impl<'widget> RequestExecutor<'_> {
         }
     }
 
+    fn perform_request(&mut self) -> Option<WidgetCommand> {
+        self.error = None;
+        self.output_data.clear();
+        let perform_request_result = self.perform_curl_request();
+        match perform_request_result {
+            Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
+                Some(content_type) if content_type.as_str().contains("application/json") => {
+                    self.editor = TextArea::from(
+                        self.json_formatter
+                            .format_output_data_into_lines(&self.output_data)
+                            .unwrap_or(vec!["Json formatting failed".to_string()]),
+                    )
+                }
+                _ => {
+                    self.editor = String::from_utf8_lossy(&self.output_data)
+                        .to_string()
+                        .split('\n')
+                        .map(|str| str.to_string())
+                        .collect();
+                }
+            },
+            Err(e) => self.error = Some(e),
+        }
+        None
+    }
+
     fn move_cursor(&mut self, operator: CursorMovement) {
         if let Ok(movement) = TryInto::<CursorMove>::try_into(operator.clone()) {
             self.editor.move_cursor(movement);
@@ -291,8 +317,6 @@ impl<'widget> StatefulWidgetRef for RequestExecutor<'widget> {
 impl<'widget> InputListener for RequestExecutor<'widget> {
     fn handle_event(&mut self, e: crossterm::event::Event) -> Option<WidgetCommand> {
         match e {
-            crossterm::event::Event::FocusGained => {}
-            crossterm::event::Event::FocusLost => {}
             crossterm::event::Event::Key(key_event) => match key_event {
                 KeyEvent {
                     code: KeyCode::Up, ..
@@ -318,71 +342,46 @@ impl<'widget> InputListener for RequestExecutor<'widget> {
                     code: KeyCode::Char(ch),
                     ..
                 } => {
-                    if ch == 'E' {
-                        self.error = None;
-                        self.output_data.clear();
-                        let perform_request_result = self.perform_request();
-                        match perform_request_result {
-                            Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
-                                Some(content_type)
-                                    if content_type.as_str().contains("application/json") =>
-                                {
-                                    self.editor = TextArea::from(
-                                        self.json_formatter
-                                            .format_output_data_into_lines(&self.output_data)
-                                            .unwrap_or(vec!["Json formatting failed".to_string()]),
-                                    )
-                                }
-                                _ => {
-                                    self.editor = String::from_utf8_lossy(&self.output_data)
-                                        .to_string()
-                                        .split('\n')
-                                        .map(|str| str.to_string())
-                                        .collect();
-                                }
-                            },
-                            Err(e) => self.error = Some(e),
+                    if let Ok(VimMotion::Move(movement)) = ch.try_into() {
+                        self.move_cursor(movement);
+                    }
+                    match ch {
+                        'E' => {
+                            return self.perform_request();
+                        }
+                        'H' if matches!(self.view, RequestExecutorView::RequestBody) => {
+                            self.view = RequestExecutorView::Headers;
+                            return Some(WidgetCommand::Clear {});
+                        }
+                        'B' if matches!(self.view, RequestExecutorView::Headers) => {
+                            self.view = RequestExecutorView::RequestBody;
+                            return Some(WidgetCommand::Clear {});
                         }
 
-                        return None;
-                    };
-
-                    match self.view {
-                        RequestExecutorView::RequestBody => match ch {
-                            'H' => {
-                                self.view = RequestExecutorView::Headers;
-                                return Some(WidgetCommand::Clear {});
+                        keys::UP if matches!(self.view, RequestExecutorView::Headers) => {
+                            if self.header_paragraph_scroll >= 1 {
+                                self.header_paragraph_scroll -= 1;
                             }
-                            keys::UP | keys::DOWN | keys::LEFT | keys::RIGHT => self.move_cursor(
+                        }
+                        keys::DOWN if matches!(self.view, RequestExecutorView::Headers) => {
+                            self.header_paragraph_scroll += 1;
+                        }
+
+                        keys::UP | keys::DOWN | keys::LEFT | keys::RIGHT
+                            if matches!(self.view, RequestExecutorView::RequestBody) =>
+                        {
+                            self.move_cursor(
                                 ch.try_into()
                                     .expect("Char is guaranteed to be valid direction"),
-                            ),
-                            _ => {}
-                        },
-                        RequestExecutorView::Headers => {
-                            match ch {
-                                'B' => {
-                                    self.view = RequestExecutorView::RequestBody;
-                                    return Some(WidgetCommand::Clear {});
-                                }
-                                keys::UP => {
-                                    if self.header_paragraph_scroll >= 1 {
-                                        self.header_paragraph_scroll -= 1;
-                                    }
-                                }
-                                keys::DOWN => {
-                                    self.header_paragraph_scroll += 1;
-                                }
-                                _ => {}
-                            };
+                            )
                         }
-                    }
+                        _ => {}
+                    };
                 }
                 _ => {}
             },
             _ => {}
         }
-
         None
     }
 }
