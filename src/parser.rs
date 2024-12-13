@@ -19,7 +19,7 @@ use url::Url;
 
 use crate::{
     editor::colors::{EditorColorscheme, JsonOutputColorscheme},
-    types::{BodyType, CurlmanRequestParamType, RequestInfo},
+    types::{BodyType, CurlFlag, CurlmanRequestParamType, RequestInfo},
 };
 
 fn string_parser_global(input: &str) -> IResult<&str, &str> {
@@ -96,51 +96,59 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, Verbos
     for (param_type, value) in params {
         let param_type_res: Result<CurlmanRequestParamType, _> = param_type.parse();
 
-        let Ok(param_type) = param_type_res else {
-            return Err(nom::Err::Failure(VerboseError {
-                errors: vec![(
-                    param_type,
-                    VerboseErrorKind::Context("Invalid Parameter Type"),
-                )],
-            }));
-        };
+        match param_type_res {
+            Ok(param_type) => match param_type {
+                CurlmanRequestParamType::Method => {
+                    let method_res: Result<Method, _> = value.parse();
+                    let Ok(method) = method_res else {
+                        return Err(nom::Err::Failure(VerboseError {
+                            errors: vec![(
+                                value,
+                                VerboseErrorKind::Context("Invalid Request Method"),
+                            )],
+                        }));
+                    };
+                    request_info.method = method
+                }
+                CurlmanRequestParamType::Header => {
+                    let (_, (key, value)) =
+                        separated_pair(take_till(|ch| ch == ':'), tag(":"), take_while(|_| true))(
+                            value,
+                        )?;
 
-        match param_type {
-            CurlmanRequestParamType::Method => {
-                let method_res: Result<Method, _> = value.parse();
-                let Ok(method) = method_res else {
+                    request_info
+                        .headers
+                        .insert(key.to_string(), value.to_string());
+                }
+                CurlmanRequestParamType::Body(BodyType::Json) => {
+                    request_info.body = Some(value.as_bytes().into());
+                }
+                CurlmanRequestParamType::Timeout => {
+                    let (_, real_value) = decimal_integer(value).map_err(|_| {
+                        nom::Err::Failure(VerboseError {
+                            errors: vec![(
+                                value,
+                                VerboseErrorKind::Context("Invalid Request Timeout Len"),
+                            )],
+                        })
+                    })?;
+
+                    request_info.timeout = Duration::from_secs(real_value);
+                }
+            },
+            Err(_) => {
+                let Ok(flag) = param_type.parse::<CurlFlag>() else {
                     return Err(nom::Err::Failure(VerboseError {
-                        errors: vec![(value, VerboseErrorKind::Context("Invalid Request Method"))],
+                        errors: vec![(
+                            param_type,
+                            VerboseErrorKind::Context("Invalid Parameter Type"),
+                        )],
                     }));
                 };
-                request_info.method = method
-            }
-            CurlmanRequestParamType::Header => {
-                let (_, (key, value)) =
-                    separated_pair(take_till(|ch| ch == ':'), tag(":"), take_while(|_| true))(
-                        value,
-                    )?;
 
-                request_info
-                    .headers
-                    .insert(key.to_string(), value.to_string());
+                request_info.flags.push(flag)
             }
-            CurlmanRequestParamType::Body(BodyType::Json) => {
-                request_info.body = Some(value.as_bytes().into());
-            }
-            CurlmanRequestParamType::Timeout => {
-                let (_, real_value) = decimal_integer(value).map_err(|_| {
-                    nom::Err::Failure(VerboseError {
-                        errors: vec![(
-                            value,
-                            VerboseErrorKind::Context("Invalid Request Timeout Len"),
-                        )],
-                    })
-                })?;
-
-                request_info.timeout = Duration::from_secs(real_value);
-            }
-        }
+        };
     }
 
     Ok((input, request_info))
@@ -660,7 +668,8 @@ mod tests {
                 url: Some("http://example.com".parse::<Url>().unwrap()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
-                body: None
+                body: None,
+                flags: vec![]
             }
         );
         let input = r#"curl http://example.com"#;
@@ -673,6 +682,7 @@ mod tests {
         assert_eq!(
             request,
             RequestInfo {
+                flags: vec![],
                 headers: HashMap::new(),
                 url: Some("http://example.com".parse::<Url>().unwrap()),
                 method: http::Method::GET,
@@ -694,6 +704,7 @@ mod tests {
         assert_eq!(
             request,
             RequestInfo {
+                flags: vec![],
                 headers: HashMap::from([(
                     "Authorization".to_string(),
                     " Basic ${TOKEN}".to_string()
@@ -740,6 +751,7 @@ mod tests {
             requests,
             vec![
                 RequestInfo {
+                    flags: vec![],
                     headers: HashMap::new(),
                     url: Some("http://example.com".parse::<Url>().unwrap()),
                     method: http::Method::GET,
@@ -747,6 +759,7 @@ mod tests {
                     body: None
                 },
                 RequestInfo {
+                    flags: vec![],
                     headers: HashMap::from([(
                         "Authorization".to_string(),
                         " Bearer ${TOKEN}".to_string()
@@ -771,6 +784,7 @@ mod tests {
             requests,
             vec![RequestInfo {
                 headers: HashMap::new(),
+                flags: vec![],
                 url: Some("http://example.com".parse::<Url>().unwrap()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
@@ -795,7 +809,8 @@ mod tests {
                 url: Some("http://example.com".parse::<Url>().unwrap()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
-                body: None
+                body: None,
+                flags: vec![]
             },]
         )
     }

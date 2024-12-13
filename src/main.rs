@@ -11,16 +11,17 @@ use crossterm::{
     terminal::disable_raw_mode,
 };
 
-use editor::WidgetCommand;
+use editor::{InputListener, WidgetCommand};
 use jq_sys::{jq_init, jq_state, jq_teardown};
 use parser::parse_curlman_request_file;
-use ratatui::widgets::ListState;
+use ratatui::widgets::{ListState, StatefulWidgetRef};
 
 use ratatui::{
     layout::{Direction, Layout},
     prelude::*,
     DefaultTerminal,
 };
+use tui_textarea::TextArea;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};

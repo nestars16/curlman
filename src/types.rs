@@ -96,6 +96,7 @@ pub struct RequestInfo {
     pub method: Method,
     pub timeout: Duration,
     pub body: Option<Vec<u8>>,
+    pub flags: Vec<CurlFlag>,
 }
 
 impl RequestInfo {
@@ -110,6 +111,7 @@ impl RequestInfo {
 impl Default for RequestInfo {
     fn default() -> Self {
         Self {
+            flags: vec![],
             headers: HashMap::new(),
             method: Method::GET,
             url: None,
@@ -121,6 +123,11 @@ impl Default for RequestInfo {
 
 pub enum BodyType {
     Json,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub enum CurlFlag {
+    Insecure,
 }
 
 pub enum CurlmanRequestParamType {
@@ -138,6 +145,16 @@ impl FromStr for CurlmanRequestParamType {
             "-H" => Ok(Self::Header),
             "-d" | "--data" => Ok(Self::Body(BodyType::Json)),
             "-m" | "--max" => Ok(Self::Timeout),
+            _ => Err(()),
+        }
+    }
+}
+
+impl FromStr for CurlFlag {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "--insecure" | "-k" => Ok(CurlFlag::Insecure),
             _ => Err(()),
         }
     }

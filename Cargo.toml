@@ -12,6 +12,7 @@ http = "1.1.0"
 jq-sys = "0.2.2"
 nom = { version = "7.1.3", features = ["alloc"] }
 ratatui = { version = "0.29", features = ["unstable-widget-ref"] }
+tui-textarea = "0.7.0"
 url = "2.5.2"
 
 [features]

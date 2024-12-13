@@ -1,4 +1,4 @@
-use crate::{error::Error, keys, parser::parse_curlman_editor, types::RequestInfo, AppState};
+use crate::{error::Error, keys, types::RequestInfo, AppState};
 use arboard::Clipboard;
 use colors::{get_default_editor_colorscheme, EditorColorscheme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -6,50 +6,18 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     prelude::*,
-    text::{Line, Text},
-    widgets::{Block, BorderType, List, Paragraph, StatefulWidgetRef},
+    widgets::{Block, BorderType, List, StatefulWidgetRef},
 };
-
-use std::sync::atomic::AtomicU16;
+use tui_textarea::{CursorMove, TextArea};
 
 pub mod widget_common {
-
     use ratatui::{
-        style::Color,
-        style::Stylize,
+        style::{Color, Stylize},
         text::{Line, Span},
     };
 
+    use super::WidgetCommand;
     use crate::keys;
-
-    use super::{CursorMovement, WidgetCommand};
-
-    pub fn adjust_viewport(
-        editor_height: i32,
-        editor_width: u16,
-        top_row: i32,
-        current_row: i32,
-        lines: &Vec<String>,
-    ) -> Option<u16> {
-        if editor_width == 0 {
-            return None;
-        }
-
-        let overflow_lines = lines[..(current_row as usize)]
-            .iter()
-            .filter(|l| l.len() > editor_width as usize)
-            .map(|l| l.len().div_ceil(editor_width as usize) - 1)
-            .sum::<usize>() as i32;
-
-        let row_pos_in_viewport = top_row + editor_height - current_row - overflow_lines;
-        if row_pos_in_viewport <= 0 {
-            Some((top_row + 1) as u16)
-        } else if row_pos_in_viewport >= editor_height {
-            Some(current_row as u16)
-        } else {
-            None
-        }
-    }
 
     pub fn move_widget_selection(pressed: char) -> Option<WidgetCommand> {
         match pressed {
@@ -77,16 +45,13 @@ pub mod widget_common {
         }
     }
 
+    /*
     pub fn get_next_cursor_position(
         current_row: usize,
         current_col: usize,
         lines: &Vec<String>,
         operator: CursorMovement,
     ) -> Option<(usize, usize)> {
-        fn fit_col(col: usize, line: &str) -> usize {
-            std::cmp::min(col, line.chars().count())
-        }
-
         match operator {
             CursorMovement::Right if current_col >= lines[current_row].chars().count() => {
                 (current_row + 1 < lines.len()).then(|| (current_row + 1, 0))
@@ -109,15 +74,162 @@ pub mod widget_common {
             CursorMovement::UntilEndOfLine => {
                 Some((current_row, lines[current_row].chars().count()))
             }
-            CursorMovement::UntilStartOfBuffer => Some((0, fit_col(current_col, &lines[0]))),
-            CursorMovement::UntilEndOfBuffer => {
-                let row = lines.len() - 1;
-                Some((row, fit_col(current_col, &lines[row])))
-            }
             CursorMovement::Until(_) => None,
             CursorMovement::Whole => None,
         }
     }
+
+    fn split_at_utf8_safe(text: &str, split_char_idx: usize) -> (&str, &str) {
+        text.split_at(get_split_byte_idx(text, split_char_idx))
+    }
+
+    fn get_split_byte_idx(text: &str, split_char_idx: usize) -> usize {
+        let split_val_idx = text.char_indices().nth(split_char_idx);
+        match split_val_idx {
+            Some((split_val, _)) => split_val,
+            None => 0,
+        }
+    }
+
+    fn get_first_char_end(text: &str) -> usize {
+        match text.char_indices().take(2).last() {
+            Some((idx, _)) => idx,
+            None => 1,
+        }
+    }
+
+    pub fn fit_and_process_text_tokens_into_editor_window_utf8<'widget>(
+        editor_col: usize,
+        text: &'widget str,
+        color: Color,
+        area_width: u16,
+        cursor_has_to_be_set: bool,
+        is_cursor_set: &mut bool,
+        current_col: &mut usize,
+        lines: &mut Vec<Line<'widget>>,
+        spans: &mut Vec<Span<'widget>>,
+    ) {
+        let will_overflow = *current_col + text.len() > area_width as usize;
+
+        match (cursor_has_to_be_set, will_overflow) {
+            (false, false) => {
+                spans.push(Span::raw(text).fg(color));
+            }
+            (true, false) => {
+                *is_cursor_set = true;
+                //this is the index of the CHARACTER in which it will split
+                let split_val_character_num = editor_col - *current_col;
+                //this is the index of the BYTE of where the text will be split;
+                let (before_cursor, at_and_before_cursor) =
+                    split_at_utf8_safe(text, split_val_character_num);
+                spans.push(Span::raw(before_cursor).fg(color));
+                let first_character_end_idx = get_first_char_end(text);
+                let string_segments = (
+                    at_and_before_cursor.get(..first_character_end_idx),
+                    at_and_before_cursor.get(first_character_end_idx..),
+                );
+                if let (Some(cursor_char), Some(rest_of_span)) = string_segments {
+                    spans.push(Span::raw(cursor_char).fg(color).reversed());
+                    spans.push(Span::raw(rest_of_span).fg(color));
+                } else {
+                    spans.push(Span::raw(" ").reversed());
+                }
+            }
+            (false, true) => {
+                let remaining_space_in_line =
+                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
+                let (start, mut end) = split_at_utf8_safe(text, remaining_space_in_line);
+                spans.push(Span::raw(start).fg(color));
+                lines.push(Line::from(std::mem::take(spans)));
+
+                while end.len() > area_width as usize {
+                    //FIXME make this tolerate utf8 bounds
+                    spans.push(Span::raw(&end[..area_width as usize]).fg(color));
+                    lines.push(Line::from(std::mem::take(spans)));
+                    end = &end[area_width as usize..];
+                }
+
+                spans.push(Span::raw(end).fg(color));
+                *current_col = end.len().checked_sub(1).unwrap_or(0);
+            }
+            (true, true) => {
+                *is_cursor_set = true;
+
+                let mut remaining_space_in_line =
+                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
+
+                let line_cursor_idx = editor_col.checked_sub(*current_col).unwrap_or(0);
+
+                let (before_cursor, containing_and_after_cursor) =
+                    split_at_utf8_safe(text, line_cursor_idx);
+
+                match before_cursor.len() < remaining_space_in_line {
+                    true => {
+                        spans.push(Span::raw(before_cursor).fg(color));
+                        remaining_space_in_line -= before_cursor.len();
+                    }
+                    false => {
+                        //FIXME make this tolerate utf8 bounds
+                        spans.push(Span::raw(&before_cursor[..remaining_space_in_line]).fg(color));
+                        lines.push(Line::from(std::mem::take(spans)));
+                        let mut remaining_before_cursor_text =
+                            &before_cursor[remaining_space_in_line..];
+
+                        while remaining_before_cursor_text.len() > area_width as usize {
+                            spans.push(
+                                Span::raw(&remaining_before_cursor_text[..area_width as usize])
+                                    .fg(color),
+                            );
+                            lines.push(Line::from(std::mem::take(spans)));
+                            remaining_before_cursor_text =
+                                &remaining_before_cursor_text[area_width as usize..];
+                        }
+
+                        spans.push(Span::raw(remaining_before_cursor_text).fg(color));
+                        remaining_space_in_line = (area_width as usize)
+                            .checked_sub(remaining_before_cursor_text.len())
+                            .unwrap_or(0);
+                    }
+                }
+                match containing_and_after_cursor.len() {
+                    0 => {}
+                    1 => {
+                        spans.push(Span::raw(containing_and_after_cursor).fg(color).reversed());
+                    }
+                    _ => {
+                        let first_cursor_char_end = get_first_char_end(containing_and_after_cursor);
+                        let cursor_char = &containing_and_after_cursor[..first_cursor_char_end];
+                        assert!(cursor_char.len() == 1);
+                        spans.push(Span::raw(cursor_char).fg(color).reversed());
+                        remaining_space_in_line = match remaining_space_in_line.checked_sub(1) {
+                            Some(new) => new,
+                            None => {
+                                lines.push(Line::from(std::mem::take(spans)));
+                                area_width as usize
+                            }
+                        };
+                        let mut after_cursor =
+                            &containing_and_after_cursor[first_cursor_char_end..];
+
+                        while after_cursor.len() > remaining_space_in_line {
+                            //FIXME make this tolerate utf8 bounds
+                            spans.push(
+                                Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
+                            );
+                            lines.push(Line::from(std::mem::take(spans)));
+                            after_cursor = &after_cursor[remaining_space_in_line..];
+
+                            remaining_space_in_line = area_width as usize;
+                        }
+                        spans.push(Span::raw(after_cursor).fg(color));
+                        *current_col = after_cursor.len();
+                    }
+                }
+            }
+        }
+    }
+
+    */
 
     pub fn fit_and_process_text_tokens_into_editor_window<'widget>(
         editor_col: usize,
@@ -140,6 +252,7 @@ pub mod widget_common {
                 *is_cursor_set = true;
 
                 let split_val = editor_col - *current_col;
+
                 let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
 
                 spans.push(Span::raw(before_cursor).fg(color));
@@ -315,18 +428,23 @@ pub enum VimState {
     WritingCommand,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CursorMovement {
-    Up,
-    Down,
-    Left,
-    Right,
+    Regular(CursorMove),
     Until(char),
-    Whole,
-    UntilEndOfLine,
-    UntilStartOfLine,
-    UntilStartOfBuffer,
-    UntilEndOfBuffer,
+    WholeLine,
+}
+
+impl TryFrom<CursorMovement> for CursorMove {
+    type Error = ();
+
+    fn try_from(value: CursorMovement) -> Result<Self, Self::Error> {
+        match value {
+            CursorMovement::Regular(cursor_move) => Ok(cursor_move),
+            CursorMovement::Until(_) => Err(()),
+            CursorMovement::WholeLine => Err(()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -364,16 +482,14 @@ impl TryFrom<&str> for VimCommand {
 
 impl TryFrom<char> for CursorMovement {
     type Error = ();
-
     fn try_from(value: char) -> Result<Self, Self::Error> {
         match value {
-            'k' => Ok(Self::Up),
-            'j' => Ok(Self::Down),
-            '$' => Ok(Self::UntilEndOfLine),
-            '0' => Ok(Self::UntilStartOfLine),
-            'h' => Ok(Self::Left),
-            'l' => Ok(Self::Right),
-            'd' | 'y' => Ok(Self::Whole),
+            'k' => Ok(Self::Regular(CursorMove::Up)),
+            'j' => Ok(Self::Regular(CursorMove::Down)),
+            '$' => Ok(Self::Regular(CursorMove::End)),
+            '0' => Ok(Self::Regular(CursorMove::Head)),
+            'h' => Ok(Self::Regular(CursorMove::Back)),
+            'l' => Ok(Self::Regular(CursorMove::Forward)),
             _ => Err(()),
         }
     }
@@ -386,15 +502,15 @@ impl TryFrom<char> for VimMotion {
             'i' => Ok(Self::Insert),
             'a' => Ok(Self::Append),
             'p' => Ok(Self::PasteClipboard),
-            'k' => Ok(Self::Move(CursorMovement::Up)),
-            'j' => Ok(Self::Move(CursorMovement::Down)),
-            'h' => Ok(Self::Move(CursorMovement::Left)),
-            'l' => Ok(Self::Move(CursorMovement::Right)),
+            'k' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Up))),
+            'j' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Down))),
+            'h' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Back))),
+            'l' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Forward))),
             'o' => Ok(Self::InsertNewLineDown),
-            '0' => Ok(Self::Move(CursorMovement::UntilStartOfLine)),
-            'G' => Ok(Self::Move(CursorMovement::UntilEndOfBuffer)),
-            '$' => Ok(Self::Move(CursorMovement::UntilEndOfLine)),
-            'x' => Ok(Self::Delete(CursorMovement::Right)),
+            '0' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Head))),
+            'G' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Bottom))),
+            '$' => Ok(Self::Move(CursorMovement::Regular(CursorMove::End))),
+            'x' => Ok(Self::Delete(CursorMovement::Regular(CursorMove::Back))),
             _ => Err(()),
         }
     }
@@ -405,11 +521,11 @@ impl TryFrom<[char; 3]> for VimMotion {
     fn try_from(value: [char; 3]) -> Result<Self, Self::Error> {
         match value {
             ['f', second, ' '] => Ok(Self::Move(CursorMovement::Until(second))),
-            ['d', 'd', ' '] => Ok(Self::Delete(CursorMovement::Whole)),
+            ['d', 'd', ' '] => Ok(Self::Delete(CursorMovement::WholeLine)),
             ['d', 'f', ' '] => Err(()),
             ['d', 'f', third] => Ok(Self::Delete(CursorMovement::Until(third))),
             ['y', 'f', ' '] => Err(()),
-            ['g', 'g', ' '] => Ok(Self::Move(CursorMovement::UntilStartOfBuffer)),
+            ['g', 'g', ' '] => Ok(Self::Move(CursorMovement::Regular(CursorMove::Top))),
             _ => Err(()),
         }
     }
@@ -448,15 +564,9 @@ pub enum EditorMode {
 }
 
 pub struct Editor<'editor> {
-    col: usize,
-    row: usize,
-    top_row: u16,
-    editor_height: AtomicU16,
-    editor_width: AtomicU16,
-    pub lines: Vec<String>,
+    pub editor: TextArea<'editor>,
     colorscheme: EditorColorscheme,
     block: Block<'editor>,
-    tab_len: u8,
     current_mode: EditorMode,
     selected: bool,
 }
@@ -467,7 +577,6 @@ impl<'editor> Editor<'editor> {
             block: get_round_bordered_box()
                 .border_style(Style::new().red())
                 .title("Editor"),
-            tab_len: 4,
             current_mode: EditorMode::Vim {
                 mode: VimMode::Normal,
                 state: VimEditorState {
@@ -478,19 +587,14 @@ impl<'editor> Editor<'editor> {
                 },
             },
             selected: true,
-            col: 0,
-            row: 0,
-            lines: start_state,
             colorscheme: get_default_editor_colorscheme(),
-            top_row: 0,
-            editor_height: AtomicU16::new(0),
-            editor_width: AtomicU16::new(0),
+            editor: TextArea::from(start_state),
         }
     }
 
+    /*
     fn get_editor_text(&self, area: Rect) -> Text {
         let tokenized_lines = parse_curlman_editor(&self.lines);
-
         let mut spans = Vec::new();
         let mut lines = Vec::new();
         let mut is_cursor_set = false;
@@ -566,6 +670,7 @@ impl<'editor> Editor<'editor> {
 
         Text::from(lines)
     }
+    */
 
     fn handle_input(&mut self, event: Event) -> Option<WidgetCommand> {
         match event {
@@ -589,40 +694,42 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Char(ch),
                 kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 ..
-            } => {
-                self.insert_char(ch);
-            }
+            } => self.editor.insert_char(ch),
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
-            } => self.insert_newline(),
+            } => self.editor.insert_newline(),
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
-            } => self.backspace_delete(),
+            } => {
+                self.editor.delete_char();
+            }
             KeyEvent {
                 code: KeyCode::Tab, ..
-            } => self.insert_tab(),
+            } => {
+                self.editor.insert_tab();
+            }
             KeyEvent {
                 code: KeyCode::Up,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_cursor(CursorMovement::Up),
+            } => self.editor.move_cursor(CursorMove::Up),
             KeyEvent {
                 code: KeyCode::Down,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_cursor(CursorMovement::Down),
+            } => self.editor.move_cursor(CursorMove::Down),
             KeyEvent {
                 code: KeyCode::Left,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_cursor(CursorMovement::Left),
+            } => self.editor.move_cursor(CursorMove::Back),
             KeyEvent {
                 code: KeyCode::Right,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.move_cursor(CursorMovement::Right),
+            } => self.editor.move_cursor(CursorMove::Forward),
             KeyEvent {
                 code: KeyCode::Esc,
                 modifiers: KeyModifiers::NONE,
@@ -642,7 +749,7 @@ impl<'editor> Editor<'editor> {
         match command {
             VimCommand::Save => {
                 return Some(WidgetCommand::Save {
-                    text: self.lines.join("\n"),
+                    text: self.editor.lines().join("\n"),
                 });
             }
             VimCommand::Quit => {
@@ -661,41 +768,13 @@ impl<'editor> Editor<'editor> {
                 self.switch_to_insert_mode();
             }
             VimMotion::Delete(vim_operator) => match vim_operator {
-                CursorMovement::Right => {
-                    self.backspace_delete();
-                }
-                CursorMovement::Until(char) => {
-                    let current_line = &self.lines[self.row];
-                    let char_idx = current_line.find(char);
-                    if let Some(idx) = char_idx {
-                        self.lines[self.row].drain(self.col..idx);
-                    }
-                }
-                CursorMovement::Whole => {
-                    self.lines.remove(self.row);
-                    if self.lines.is_empty() {
-                        self.lines.push(String::new());
-                        self.col = 0;
-                        self.row = 0;
-                    } else if self.row >= self.lines.len() {
-                        self.row = self.lines.len() - 1;
-                    }
-                }
-                CursorMovement::UntilEndOfLine => {
-                    self.lines[self.row].drain(self.col..);
-                }
-                CursorMovement::UntilStartOfLine => {
-                    self.lines[self.row].drain(0..self.col);
-                }
-                CursorMovement::UntilStartOfBuffer => {}
-                CursorMovement::UntilEndOfBuffer => {}
-                CursorMovement::Up => {}
-                CursorMovement::Down => {}
-                CursorMovement::Left => {}
+                CursorMovement::Until(char) => {}
+                CursorMovement::Regular(cursor_move) => {}
+                CursorMovement::WholeLine => {}
             },
             VimMotion::InsertNewLineDown => {
-                self.move_cursor(CursorMovement::UntilEndOfLine);
-                self.insert_newline();
+                self.move_cursor(CursorMovement::Regular(CursorMove::End));
+                self.editor.insert_newline();
                 self.switch_to_insert_mode();
             }
             VimMotion::PasteClipboard => {
@@ -704,13 +783,13 @@ impl<'editor> Editor<'editor> {
                     Ok(mut clipboard) => {
                         if let Ok(text) = clipboard.get_text() {
                             for ch in text.replace("\r\n", "\n").chars() {
-                                self.insert_char(ch);
+                                self.editor.insert_char(ch);
                             }
                         }
                     }
                     Err(e) => {
                         for ch in format!("Clipboard not supported : {e:?}").chars() {
-                            self.insert_char(ch);
+                            self.editor.insert_char(ch);
                         }
                     }
                 };
@@ -848,99 +927,25 @@ impl<'editor> Editor<'editor> {
         *state = VimEditorState::default();
     }
 
-    fn insert_char(&mut self, ch: char) {
-        if ch == '\n' || ch == '\r' {
-            self.insert_newline();
-            return;
-        }
-
-        let line = &mut self.lines[self.row];
-
-        let insert_idx = line
-            .char_indices()
-            .nth(self.col)
-            .map(|(i, _)| i)
-            .unwrap_or(line.len());
-
-        line.insert(insert_idx, ch);
-        self.col += 1;
-    }
-
-    fn insert_newline(&mut self) {
-        let line = &mut self.lines[self.row];
-        let offset = line
-            .char_indices()
-            .nth(self.col)
-            .map(|(i, _)| i)
-            .unwrap_or(line.len());
-
-        let next_line = line[offset..].to_string();
-        line.truncate(offset);
-
-        self.lines.insert(self.row + 1, next_line);
-        self.row += 1;
-        self.col = 0;
-        self.adjust_viewport();
-    }
-
-    fn insert_tab(&mut self) {}
-
-    fn delete_newline(&mut self) {
-        if self.row == 0 {
-            return;
-        }
-
-        let line = self.lines.remove(self.row);
-        let prev_line = &mut self.lines[self.row - 1];
-
-        self.row -= 1;
-        self.col = prev_line.chars().count();
-        prev_line.push_str(&line);
-        self.adjust_viewport()
-    }
-
-    fn adjust_viewport(&mut self) {
-        let editor_height_val = self
-            .editor_height
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        let editor_width_val = self.editor_width.load(std::sync::atomic::Ordering::Relaxed);
-
-        if let Some(new_top_row) = widget_common::adjust_viewport(
-            editor_height_val as i32,
-            editor_width_val,
-            self.top_row as i32,
-            self.row as i32,
-            &self.lines,
-        ) {
-            self.top_row = new_top_row
-        }
-    }
-
     fn move_cursor(&mut self, operator: CursorMovement) {
-        if let Some((new_row, new_col)) =
-            widget_common::get_next_cursor_position(self.row, self.col, &self.lines, operator)
-        {
-            self.col = new_col;
-            self.row = new_row;
-            self.adjust_viewport()
+        if let Ok(movement) = TryInto::<CursorMove>::try_into(operator.clone()) {
+            self.editor.move_cursor(movement);
+            return;
+        }
+
+        let lines = self.editor.lines();
+        let (row, col) = self.editor.cursor();
+        match operator {
+            CursorMovement::Until(char) => {
+                let current_line = &lines[row][col..];
+                if let Some(idx) = current_line.find(char) {
+                    self.editor
+                        .move_cursor(CursorMove::Jump(row as u16, idx as u16))
+                }
+            }
+            _ => {}
         }
     }
-
-    fn backspace_delete(&mut self) {
-        if self.col == 0 {
-            return self.delete_newline();
-        }
-
-        let line = &mut self.lines[self.row];
-
-        if let Some((offset, _)) = line.char_indices().nth(self.col - 1) {
-            line.remove(offset);
-            self.col -= 1;
-        }
-    }
-
-    fn forward_delete(&mut self) {}
 }
 impl<'editor> StatefulWidgetRef for Editor<'editor> {
     #[doc = " State associated with the stateful widget."]
@@ -954,20 +959,12 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         let text_area = self.block.inner(area);
         self.block.clone().render(area, buf);
         let editor_area_height = text_area.height.saturating_sub(COMMAND_BAR_HEIGHT);
-
         let editor_area = Rect {
             x: text_area.x,
             y: text_area.y,
             width: text_area.width,
             height: editor_area_height,
         };
-
-        self.editor_height
-            .store(editor_area.height, std::sync::atomic::Ordering::Relaxed);
-
-        self.editor_width
-            .store(editor_area.width, std::sync::atomic::Ordering::Relaxed);
-
         let command_bar_area = Rect {
             x: text_area.x,
             y: text_area.y + editor_area_height, // Position immediately below the editor area
@@ -975,9 +972,8 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
             height: 1,
         };
 
-        let inner_editor_content = Paragraph::new(self.get_editor_text(editor_area));
+        self.editor.render(editor_area, buf);
 
-        inner_editor_content.render(editor_area, buf);
         let EditorMode::Vim {
             ref state,
             ref mode,
@@ -1013,7 +1009,7 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
 
 #[derive(Debug)]
 pub enum WidgetCommand {
-    Clear { is_header_map_empty: bool },
+    Clear {},
     MoveWidgetSelection { direction: keys::Direction },
     Save { text: String },
     MoveRequestSelection { new_idx: usize },
