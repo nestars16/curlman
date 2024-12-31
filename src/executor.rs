@@ -12,13 +12,13 @@ use std::{
 };
 
 use crate::{
+    cursor_movements::{CursorMoveDirection, CursorMovement},
     editor::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
         get_round_bordered_box,
         widget_common::EditorInner,
-        CurlmanWidget, CursorMoveDirection, CursorMovement, InputListener, VimMotion,
-        WidgetCommand,
+        CurlmanWidget, InputListener, VimMotion, WidgetCommand,
     },
     error::Error,
     keys,
@@ -295,7 +295,7 @@ impl<'widget> StatefulWidgetRef for RequestExecutor {
 
         match self.view {
             RequestExecutorView::RequestBody => {
-                //self.editor.render(text_area, buf);
+                self.editor.render(text_area, buf);
             }
             RequestExecutorView::Headers => {
                 let mut paragraph_buf = String::new();

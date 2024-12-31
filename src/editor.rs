@@ -1,6 +1,10 @@
-use std::cmp;
-
-use crate::{error::Error, keys, types::RequestInfo, AppState};
+use crate::{
+    cursor_movements::{CursorMoveDirection, CursorMovement},
+    error::Error,
+    keys,
+    types::RequestInfo,
+    AppState,
+};
 use arboard::Clipboard;
 use colors::{get_default_editor_colorscheme, EditorColorscheme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -18,12 +22,12 @@ pub mod widget_common {
         buffer::Buffer,
         layout::Rect,
         style::Stylize,
-        text::{Line, Span},
-        widgets::{Paragraph, Widget, WidgetRef},
+        text::{Line, Span, Text},
+        widgets::{Widget, WidgetRef},
     };
 
-    use super::{CursorMoveDirection, WidgetCommand};
-    use crate::keys;
+    use super::WidgetCommand;
+    use crate::{cursor_movements::CursorMoveDirection, keys};
 
     pub struct EditorInner {
         pub lines: Vec<String>,
@@ -35,7 +39,7 @@ pub mod widget_common {
         #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
         #[doc = " to implement a custom widget."]
         fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-            Paragraph::new(match self.tokenizer {
+            Text::from(match self.tokenizer {
                 Some(tokenizer) => tokenizer(&self.lines, area),
                 None => self.wrap_editor_lines_no_color(area),
             })
@@ -332,201 +336,6 @@ pub enum VimState {
     WritingCommand,
 }
 
-#[derive(Clone, Debug)]
-pub enum CursorMoveDirection {
-    Forward,
-    Back,
-    Up,
-    Down,
-    Head,
-    End,
-    Top,
-    Bottom,
-    WordForward,
-    WordEnd,
-    WordBack,
-    Jump(u16, u16),
-}
-
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum CharKind {
-    Space,
-    Punct,
-    Other,
-}
-
-impl CharKind {
-    fn new(c: char) -> Self {
-        if c.is_whitespace() {
-            Self::Space
-        } else if c.is_ascii_punctuation() {
-            Self::Punct
-        } else {
-            Self::Other
-        }
-    }
-}
-
-pub fn find_word_start_forward(line: &str, start_col: usize) -> Option<usize> {
-    let mut it = line.chars().enumerate().skip(start_col);
-    let mut prev = CharKind::new(it.next()?.1);
-    for (col, c) in it {
-        let cur = CharKind::new(c);
-        if cur != CharKind::Space && prev != cur {
-            return Some(col);
-        }
-        prev = cur;
-    }
-    None
-}
-
-pub fn find_word_exclusive_end_forward(line: &str, start_col: usize) -> Option<usize> {
-    let mut it = line.chars().enumerate().skip(start_col);
-    let mut prev = CharKind::new(it.next()?.1);
-    for (col, c) in it {
-        let cur = CharKind::new(c);
-        if prev != CharKind::Space && prev != cur {
-            return Some(col);
-        }
-        prev = cur;
-    }
-    None
-}
-
-pub fn find_word_inclusive_end_forward(line: &str, start_col: usize) -> Option<usize> {
-    let mut it = line.chars().enumerate().skip(start_col);
-    let (mut last_col, c) = it.next()?;
-    let mut prev = CharKind::new(c);
-    for (col, c) in it {
-        let cur = CharKind::new(c);
-        if prev != CharKind::Space && cur != prev {
-            return Some(col.saturating_sub(1));
-        }
-        prev = cur;
-        last_col = col;
-    }
-    if prev != CharKind::Space {
-        Some(last_col)
-    } else {
-        None
-    }
-}
-
-pub fn find_word_start_backward(line: &str, start_col: usize) -> Option<usize> {
-    let idx = line
-        .char_indices()
-        .nth(start_col)
-        .map(|(i, _)| i)
-        .unwrap_or(line.len());
-    let mut it = line[..idx].chars().rev().enumerate();
-    let mut cur = CharKind::new(it.next()?.1);
-    for (i, c) in it {
-        let next = CharKind::new(c);
-        if cur != CharKind::Space && next != cur {
-            return Some(start_col - i);
-        }
-        cur = next;
-    }
-    (cur != CharKind::Space).then(|| 0)
-}
-
-impl CursorMoveDirection {
-    pub fn next_cursor(
-        &self,
-        (row, col): (usize, usize),
-        lines: &[String],
-    ) -> Option<(usize, usize)> {
-        use CursorMoveDirection::*;
-
-        fn fit_col(col: usize, line: &str) -> usize {
-            cmp::min(col, line.chars().count())
-        }
-
-        match self {
-            Forward if col >= lines[row].chars().count() => {
-                (row + 1 < lines.len()).then(|| (row + 1, 0))
-            }
-            Forward => Some((row, col + 1)),
-            Back if col == 0 => {
-                let row = row.checked_sub(1)?;
-                Some((row, lines[row].chars().count()))
-            }
-            Back => Some((row, col - 1)),
-            Up => {
-                let row = row.checked_sub(1)?;
-                Some((row, fit_col(col, &lines[row])))
-            }
-            Down => Some((row + 1, fit_col(col, lines.get(row + 1)?))),
-            Head => Some((row, 0)),
-            End => Some((row, lines[row].chars().count())),
-            Top => Some((0, fit_col(col, &lines[0]))),
-            Bottom => {
-                let row = lines.len() - 1;
-                Some((row, fit_col(col, &lines[row])))
-            }
-            WordEnd => {
-                // `+ 1` for not accepting the current cursor position
-                if let Some(col) = find_word_inclusive_end_forward(&lines[row], col + 1) {
-                    Some((row, col))
-                } else {
-                    let mut row = row;
-                    loop {
-                        if row == lines.len() - 1 {
-                            break Some((row, lines[row].chars().count()));
-                        }
-                        row += 1;
-                        if let Some(col) = find_word_inclusive_end_forward(&lines[row], 0) {
-                            break Some((row, col));
-                        }
-                    }
-                }
-            }
-            WordForward => {
-                if let Some(col) = find_word_start_forward(&lines[row], col) {
-                    Some((row, col))
-                } else if row + 1 < lines.len() {
-                    Some((row + 1, 0))
-                } else {
-                    Some((row, lines[row].chars().count()))
-                }
-            }
-            WordBack => {
-                if let Some(col) = find_word_start_backward(&lines[row], col) {
-                    Some((row, col))
-                } else if row > 0 {
-                    Some((row - 1, lines[row - 1].chars().count()))
-                } else {
-                    Some((row, 0))
-                }
-            }
-            Jump(row, col) => {
-                let row = cmp::min(*row as usize, lines.len() - 1);
-                let col = fit_col(*col as usize, &lines[row]);
-                Some((row, col))
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum CursorMovement {
-    Regular(CursorMoveDirection),
-    Until(char),
-    WholeLine,
-}
-
-impl TryFrom<CursorMovement> for CursorMoveDirection {
-    type Error = ();
-
-    fn try_from(value: CursorMovement) -> Result<Self, Self::Error> {
-        match value {
-            CursorMovement::Regular(cursor_move) => Ok(cursor_move),
-            CursorMovement::Until(_) => Err(()),
-            CursorMovement::WholeLine => Err(()),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum VimMotion {
     Move(CursorMovement),
@@ -687,86 +496,6 @@ impl<'editor> Editor<'editor> {
             editor: start_state.into(),
         }
     }
-
-    /*
-    fn get_editor_text(&self, area: Rect) -> Text {
-        let tokenized_lines = parse_curlman_editor(&self.lines);
-        let mut spans = Vec::new();
-        let mut lines = Vec::new();
-        let mut is_cursor_set = false;
-
-        for (row_idx, line) in tokenized_lines.into_iter().enumerate() {
-            if row_idx < self.top_row as usize
-                || row_idx >= self.top_row as usize + area.height as usize
-            {
-                continue;
-            }
-
-            let mut current_col = 0;
-            for line_token in line {
-                let line_token_len = line_token.get_str().len();
-                let line_token_end = (current_col + line_token_len).checked_sub(1).unwrap_or(0);
-
-                let cursor_has_to_be_set =
-                    !is_cursor_set && row_idx == self.row && line_token_end >= self.col;
-
-                let color = line_token.get_color(&self.colorscheme);
-
-                match line_token {
-                    crate::parser::Token::Curl(text)
-                    | crate::parser::Token::Url(text)
-                    | crate::parser::Token::ParamKey(text)
-                    | crate::parser::Token::ParamValue(text)
-                    | crate::parser::Token::Unknown(text)
-                    | crate::parser::Token::Separator(text) => {
-                        widget_common::fit_and_process_text_tokens_into_editor_window(
-                            self.col,
-                            text,
-                            color,
-                            area.width,
-                            cursor_has_to_be_set,
-                            &mut is_cursor_set,
-                            &mut current_col,
-                            &mut lines,
-                            &mut spans,
-                        )
-                    }
-                    crate::parser::Token::Whitespace(text) => {
-                        widget_common::fit_and_process_text_tokens_into_editor_window(
-                            self.col,
-                            text,
-                            Color::White,
-                            area.width,
-                            cursor_has_to_be_set,
-                            &mut is_cursor_set,
-                            &mut current_col,
-                            &mut lines,
-                            &mut spans,
-                        )
-                    }
-                };
-
-                current_col += line_token_len;
-            }
-
-            if row_idx == self.row && self.col == self.lines[self.row].len() {
-                if self.col as u16 == area.width {
-                    lines.push(Line::from(std::mem::take(&mut spans)));
-                }
-
-                spans.push(Span::raw(" ").reversed());
-            }
-
-            lines.push(Line::from(std::mem::take(&mut spans)));
-        }
-
-        if !spans.is_empty() {
-            lines.push(Line::from(std::mem::take(&mut spans)));
-        }
-
-        Text::from(lines)
-    }
-    */
 
     fn handle_input(&mut self, event: Event) -> Option<WidgetCommand> {
         match event {

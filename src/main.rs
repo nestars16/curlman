@@ -1,4 +1,5 @@
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+mod cursor_movements;
 mod editor;
 mod error;
 mod executor;
