@@ -1,3 +1,5 @@
+use std::cmp;
+
 use crate::{error::Error, keys, types::RequestInfo, AppState};
 use arboard::Clipboard;
 use colors::{get_default_editor_colorscheme, EditorColorscheme};
@@ -8,16 +10,231 @@ use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, List, StatefulWidgetRef},
 };
-use tui_textarea::{CursorMove, TextArea};
+use widget_common::EditorInner;
 
 pub mod widget_common {
+
     use ratatui::{
-        style::{Color, Stylize},
+        buffer::Buffer,
+        layout::Rect,
+        style::Stylize,
         text::{Line, Span},
+        widgets::{Paragraph, Widget, WidgetRef},
     };
 
-    use super::WidgetCommand;
+    use super::{CursorMoveDirection, WidgetCommand};
     use crate::keys;
+
+    pub struct EditorInner {
+        pub lines: Vec<String>,
+        pub cursor: (usize, usize),
+        pub tokenizer: Option<fn(&Vec<String>, Rect) -> Vec<Line<'_>>>,
+    }
+
+    impl WidgetRef for EditorInner {
+        #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
+        #[doc = " to implement a custom widget."]
+        fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+            Paragraph::new(match self.tokenizer {
+                Some(tokenizer) => tokenizer(&self.lines, area),
+                None => self.wrap_editor_lines_no_color(area),
+            })
+            .render(area, buf)
+        }
+    }
+
+    impl EditorInner {
+        pub fn new() -> Self {
+            Self {
+                tokenizer: None,
+                lines: Vec::new(),
+                cursor: (0, 0),
+            }
+        }
+
+        pub fn insert_char(&mut self, c: char) {
+            if c == '\n' || c == '\r' {
+                self.insert_newline();
+                return;
+            }
+
+            let (row, col) = self.cursor;
+            let line = &mut self.lines[row];
+
+            let i = line
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+
+            line.insert(i, c);
+            self.cursor.1 += 1;
+        }
+
+        pub fn insert_newline(&mut self) {
+            let (row, col) = self.cursor;
+            let line = &mut self.lines[row];
+            let offset = line
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            let next_line = line[offset..].to_string();
+            line.truncate(offset);
+
+            self.lines.insert(row + 1, next_line);
+            self.cursor = (row + 1, 0);
+        }
+
+        pub fn insert_tab(&mut self) {
+            self.insert_char('\t')
+        }
+
+        pub fn move_cursor(&mut self, direction: CursorMoveDirection) {
+            if let Some(cursor) = direction.next_cursor(self.cursor, &self.lines) {
+                self.cursor = cursor;
+            }
+        }
+
+        fn delete_newline(&mut self) {
+            let (row, _) = self.cursor;
+            if row == 0 {
+                return;
+            }
+
+            let line = self.lines.remove(row);
+            let prev_line = &mut self.lines[row - 1];
+
+            self.cursor = (row - 1, prev_line.chars().count());
+            prev_line.push_str(&line);
+        }
+
+        pub fn delete_char(&mut self) {
+            let (row, col) = self.cursor;
+            if col == 0 {
+                return self.delete_newline();
+            }
+
+            let line = &mut self.lines[row];
+            if let Some((offset, _)) = line.char_indices().nth(col - 1) {
+                line.remove(offset);
+                self.cursor.1 -= 1;
+            }
+        }
+
+        pub fn cursor(&self) -> (usize, usize) {
+            self.cursor
+        }
+
+        pub fn lines(&self) -> &Vec<String> {
+            &self.lines
+        }
+
+        pub fn wrap_editor_lines_no_color(&self, area: Rect) -> Vec<Line<'_>> {
+            let width = area.width as usize;
+            let (row, col) = self.cursor;
+
+            self.lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| match (i == row, l.chars().count() < width) {
+                    (false, true) => {
+                        vec![Line::from(l.as_str())]
+                    }
+                    (false, false) => Self::split_line_into_multline(width, l, false, col),
+                    (true, true) => {
+                        vec![Self::split_into_single_line_cursor(l, col)]
+                    }
+                    (true, false) => Self::split_line_into_multline(width, l, true, col),
+                })
+                .flatten()
+                .collect::<Vec<_>>()
+        }
+
+        fn split_into_single_line_cursor(line: &str, col: usize) -> Line<'_> {
+            let (before_cursor, at_and_after_cursor) = line.split_at(col);
+            let (cursor_str, after_cursor) = match at_and_after_cursor.char_indices().take(1).last()
+            {
+                Some((idx, c)) => {
+                    let grapheme_end_idx = idx + c.len_utf8();
+                    (
+                        &at_and_after_cursor[idx..grapheme_end_idx],
+                        &at_and_after_cursor[grapheme_end_idx..],
+                    )
+                }
+                None => (" ", ""),
+            };
+
+            if after_cursor.is_empty() {
+                Line::from(vec![
+                    Span::raw(before_cursor),
+                    Span::raw(cursor_str).reversed(),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(before_cursor),
+                    Span::raw(cursor_str).reversed(),
+                    Span::raw(after_cursor),
+                ])
+            }
+        }
+
+        fn split_line_into_multline(
+            width: usize,
+            line: &str,
+            has_to_draw_cursor: bool,
+            col: usize,
+        ) -> Vec<Line<'_>> {
+            let mut line_segments = vec![];
+            let mut current_chunk_start = 0;
+            let mut current_char_offset = 0;
+
+            loop {
+                let current_chunk_chars = line.char_indices().skip(current_char_offset).take(width);
+
+                match current_chunk_chars.last() {
+                    Some((idx, c)) => {
+                        let chunk_end_idx = idx + c.len_utf8();
+                        let curr_line = &line[current_chunk_start..chunk_end_idx];
+
+                        match has_to_draw_cursor
+                            && current_chunk_start <= col
+                            && col <= chunk_end_idx
+                        {
+                            true => {
+                                let relative_col = col - current_chunk_start;
+
+                                line_segments.push(Self::split_into_single_line_cursor(
+                                    curr_line,
+                                    relative_col,
+                                ));
+                            }
+                            false => {
+                                line_segments.push(Line::from(curr_line));
+                            }
+                        }
+                        current_chunk_start = chunk_end_idx;
+                        current_char_offset += width;
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+
+            line_segments
+        }
+    }
+
+    impl From<Vec<String>> for EditorInner {
+        fn from(value: Vec<String>) -> Self {
+            Self {
+                tokenizer: None,
+                lines: value,
+                cursor: (0, 0),
+            }
+        }
+    }
 
     pub fn move_widget_selection(pressed: char) -> Option<WidgetCommand> {
         match pressed {
@@ -42,319 +259,6 @@ pub mod widget_common {
                 })
             }
             _ => None,
-        }
-    }
-
-    /*
-    pub fn get_next_cursor_position(
-        current_row: usize,
-        current_col: usize,
-        lines: &Vec<String>,
-        operator: CursorMovement,
-    ) -> Option<(usize, usize)> {
-        match operator {
-            CursorMovement::Right if current_col >= lines[current_row].chars().count() => {
-                (current_row + 1 < lines.len()).then(|| (current_row + 1, 0))
-            }
-            CursorMovement::Right => Some((current_row, current_col + 1)),
-            CursorMovement::Left if current_col == 0 => {
-                let row = current_row.checked_sub(1)?;
-                Some((row, lines[row].chars().count()))
-            }
-            CursorMovement::Left => Some((current_row, current_col - 1)),
-            CursorMovement::Up => {
-                let row = current_row.checked_sub(1)?;
-                Some((row, fit_col(current_col, &lines[row])))
-            }
-            CursorMovement::Down => Some((
-                current_row + 1,
-                fit_col(current_col, lines.get(current_row + 1)?),
-            )),
-            CursorMovement::UntilStartOfLine => Some((current_row, 0)),
-            CursorMovement::UntilEndOfLine => {
-                Some((current_row, lines[current_row].chars().count()))
-            }
-            CursorMovement::Until(_) => None,
-            CursorMovement::Whole => None,
-        }
-    }
-
-    fn split_at_utf8_safe(text: &str, split_char_idx: usize) -> (&str, &str) {
-        text.split_at(get_split_byte_idx(text, split_char_idx))
-    }
-
-    fn get_split_byte_idx(text: &str, split_char_idx: usize) -> usize {
-        let split_val_idx = text.char_indices().nth(split_char_idx);
-        match split_val_idx {
-            Some((split_val, _)) => split_val,
-            None => 0,
-        }
-    }
-
-    fn get_first_char_end(text: &str) -> usize {
-        match text.char_indices().take(2).last() {
-            Some((idx, _)) => idx,
-            None => 1,
-        }
-    }
-
-    pub fn fit_and_process_text_tokens_into_editor_window_utf8<'widget>(
-        editor_col: usize,
-        text: &'widget str,
-        color: Color,
-        area_width: u16,
-        cursor_has_to_be_set: bool,
-        is_cursor_set: &mut bool,
-        current_col: &mut usize,
-        lines: &mut Vec<Line<'widget>>,
-        spans: &mut Vec<Span<'widget>>,
-    ) {
-        let will_overflow = *current_col + text.len() > area_width as usize;
-
-        match (cursor_has_to_be_set, will_overflow) {
-            (false, false) => {
-                spans.push(Span::raw(text).fg(color));
-            }
-            (true, false) => {
-                *is_cursor_set = true;
-                //this is the index of the CHARACTER in which it will split
-                let split_val_character_num = editor_col - *current_col;
-                //this is the index of the BYTE of where the text will be split;
-                let (before_cursor, at_and_before_cursor) =
-                    split_at_utf8_safe(text, split_val_character_num);
-                spans.push(Span::raw(before_cursor).fg(color));
-                let first_character_end_idx = get_first_char_end(text);
-                let string_segments = (
-                    at_and_before_cursor.get(..first_character_end_idx),
-                    at_and_before_cursor.get(first_character_end_idx..),
-                );
-                if let (Some(cursor_char), Some(rest_of_span)) = string_segments {
-                    spans.push(Span::raw(cursor_char).fg(color).reversed());
-                    spans.push(Span::raw(rest_of_span).fg(color));
-                } else {
-                    spans.push(Span::raw(" ").reversed());
-                }
-            }
-            (false, true) => {
-                let remaining_space_in_line =
-                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
-                let (start, mut end) = split_at_utf8_safe(text, remaining_space_in_line);
-                spans.push(Span::raw(start).fg(color));
-                lines.push(Line::from(std::mem::take(spans)));
-
-                while end.len() > area_width as usize {
-                    //FIXME make this tolerate utf8 bounds
-                    spans.push(Span::raw(&end[..area_width as usize]).fg(color));
-                    lines.push(Line::from(std::mem::take(spans)));
-                    end = &end[area_width as usize..];
-                }
-
-                spans.push(Span::raw(end).fg(color));
-                *current_col = end.len().checked_sub(1).unwrap_or(0);
-            }
-            (true, true) => {
-                *is_cursor_set = true;
-
-                let mut remaining_space_in_line =
-                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
-
-                let line_cursor_idx = editor_col.checked_sub(*current_col).unwrap_or(0);
-
-                let (before_cursor, containing_and_after_cursor) =
-                    split_at_utf8_safe(text, line_cursor_idx);
-
-                match before_cursor.len() < remaining_space_in_line {
-                    true => {
-                        spans.push(Span::raw(before_cursor).fg(color));
-                        remaining_space_in_line -= before_cursor.len();
-                    }
-                    false => {
-                        //FIXME make this tolerate utf8 bounds
-                        spans.push(Span::raw(&before_cursor[..remaining_space_in_line]).fg(color));
-                        lines.push(Line::from(std::mem::take(spans)));
-                        let mut remaining_before_cursor_text =
-                            &before_cursor[remaining_space_in_line..];
-
-                        while remaining_before_cursor_text.len() > area_width as usize {
-                            spans.push(
-                                Span::raw(&remaining_before_cursor_text[..area_width as usize])
-                                    .fg(color),
-                            );
-                            lines.push(Line::from(std::mem::take(spans)));
-                            remaining_before_cursor_text =
-                                &remaining_before_cursor_text[area_width as usize..];
-                        }
-
-                        spans.push(Span::raw(remaining_before_cursor_text).fg(color));
-                        remaining_space_in_line = (area_width as usize)
-                            .checked_sub(remaining_before_cursor_text.len())
-                            .unwrap_or(0);
-                    }
-                }
-                match containing_and_after_cursor.len() {
-                    0 => {}
-                    1 => {
-                        spans.push(Span::raw(containing_and_after_cursor).fg(color).reversed());
-                    }
-                    _ => {
-                        let first_cursor_char_end = get_first_char_end(containing_and_after_cursor);
-                        let cursor_char = &containing_and_after_cursor[..first_cursor_char_end];
-                        assert!(cursor_char.len() == 1);
-                        spans.push(Span::raw(cursor_char).fg(color).reversed());
-                        remaining_space_in_line = match remaining_space_in_line.checked_sub(1) {
-                            Some(new) => new,
-                            None => {
-                                lines.push(Line::from(std::mem::take(spans)));
-                                area_width as usize
-                            }
-                        };
-                        let mut after_cursor =
-                            &containing_and_after_cursor[first_cursor_char_end..];
-
-                        while after_cursor.len() > remaining_space_in_line {
-                            //FIXME make this tolerate utf8 bounds
-                            spans.push(
-                                Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
-                            );
-                            lines.push(Line::from(std::mem::take(spans)));
-                            after_cursor = &after_cursor[remaining_space_in_line..];
-
-                            remaining_space_in_line = area_width as usize;
-                        }
-                        spans.push(Span::raw(after_cursor).fg(color));
-                        *current_col = after_cursor.len();
-                    }
-                }
-            }
-        }
-    }
-
-    */
-
-    pub fn fit_and_process_text_tokens_into_editor_window<'widget>(
-        editor_col: usize,
-        text: &'widget str,
-        color: Color,
-        area_width: u16,
-        cursor_has_to_be_set: bool,
-        is_cursor_set: &mut bool,
-        current_col: &mut usize,
-        lines: &mut Vec<Line<'widget>>,
-        spans: &mut Vec<Span<'widget>>,
-    ) {
-        let will_overflow = *current_col + text.len() > area_width as usize;
-
-        match (cursor_has_to_be_set, will_overflow) {
-            (false, false) => {
-                spans.push(Span::raw(text).fg(color));
-            }
-            (true, false) => {
-                *is_cursor_set = true;
-
-                let split_val = editor_col - *current_col;
-
-                let (before_cursor, at_and_before_cursor) = text.split_at(split_val);
-
-                spans.push(Span::raw(before_cursor).fg(color));
-
-                let string_segments =
-                    (at_and_before_cursor.get(..1), at_and_before_cursor.get(1..));
-
-                if let (Some(cursor_char), Some(rest_of_span)) = string_segments {
-                    spans.push(Span::raw(cursor_char).fg(color).reversed());
-                    spans.push(Span::raw(rest_of_span).fg(color));
-                } else {
-                    spans.push(Span::raw(" ").reversed());
-                }
-            }
-            (false, true) => {
-                let remaining_space_in_line =
-                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
-
-                let (start, mut end) = text.split_at(remaining_space_in_line);
-
-                spans.push(Span::raw(start).fg(color));
-                lines.push(Line::from(std::mem::take(spans)));
-
-                while end.len() > area_width as usize {
-                    spans.push(Span::raw(&end[..area_width as usize]).fg(color));
-                    lines.push(Line::from(std::mem::take(spans)));
-                    end = &end[area_width as usize..];
-                }
-
-                spans.push(Span::raw(end).fg(color));
-                *current_col = end.len().checked_sub(1).unwrap_or(0);
-            }
-            (true, true) => {
-                *is_cursor_set = true;
-
-                let mut remaining_space_in_line =
-                    (area_width as usize).checked_sub(*current_col).unwrap_or(0);
-
-                let line_cursor_idx = editor_col.checked_sub(*current_col).unwrap_or(0);
-
-                let (before_cursor, containing_and_after_cursor) = text.split_at(line_cursor_idx);
-
-                match before_cursor.len() < remaining_space_in_line {
-                    true => {
-                        spans.push(Span::raw(before_cursor).fg(color));
-                        remaining_space_in_line -= before_cursor.len();
-                    }
-                    false => {
-                        spans.push(Span::raw(&before_cursor[..remaining_space_in_line]).fg(color));
-                        lines.push(Line::from(std::mem::take(spans)));
-                        let mut remaining_before_cursor_text =
-                            &before_cursor[remaining_space_in_line..];
-
-                        while remaining_before_cursor_text.len() > area_width as usize {
-                            spans.push(
-                                Span::raw(&remaining_before_cursor_text[..area_width as usize])
-                                    .fg(color),
-                            );
-                            lines.push(Line::from(std::mem::take(spans)));
-                            remaining_before_cursor_text =
-                                &remaining_before_cursor_text[area_width as usize..];
-                        }
-
-                        spans.push(Span::raw(remaining_before_cursor_text).fg(color));
-
-                        remaining_space_in_line = (area_width as usize)
-                            .checked_sub(remaining_before_cursor_text.len())
-                            .unwrap_or(0);
-                    }
-                }
-                match containing_and_after_cursor.len() {
-                    0 => {}
-                    1 => {
-                        spans.push(Span::raw(containing_and_after_cursor).fg(color).reversed());
-                    }
-                    _ => {
-                        let cursor_char = &containing_and_after_cursor[..1];
-                        assert!(cursor_char.len() == 1);
-                        spans.push(Span::raw(cursor_char).fg(color).reversed());
-                        remaining_space_in_line = match remaining_space_in_line.checked_sub(1) {
-                            Some(new) => new,
-                            None => {
-                                lines.push(Line::from(std::mem::take(spans)));
-                                area_width as usize
-                            }
-                        };
-                        let mut after_cursor = &containing_and_after_cursor[1..];
-                        while after_cursor.len() > remaining_space_in_line {
-                            spans.push(
-                                Span::raw(&after_cursor[..remaining_space_in_line]).fg(color),
-                            );
-
-                            lines.push(Line::from(std::mem::take(spans)));
-                            after_cursor = &after_cursor[remaining_space_in_line..];
-
-                            remaining_space_in_line = area_width as usize;
-                        }
-                        spans.push(Span::raw(after_cursor).fg(color));
-                        *current_col = after_cursor.len();
-                    }
-                }
-            }
         }
     }
 }
@@ -428,14 +332,190 @@ pub enum VimState {
     WritingCommand,
 }
 
+#[derive(Clone, Debug)]
+pub enum CursorMoveDirection {
+    Forward,
+    Back,
+    Up,
+    Down,
+    Head,
+    End,
+    Top,
+    Bottom,
+    WordForward,
+    WordEnd,
+    WordBack,
+    Jump(u16, u16),
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum CharKind {
+    Space,
+    Punct,
+    Other,
+}
+
+impl CharKind {
+    fn new(c: char) -> Self {
+        if c.is_whitespace() {
+            Self::Space
+        } else if c.is_ascii_punctuation() {
+            Self::Punct
+        } else {
+            Self::Other
+        }
+    }
+}
+
+pub fn find_word_start_forward(line: &str, start_col: usize) -> Option<usize> {
+    let mut it = line.chars().enumerate().skip(start_col);
+    let mut prev = CharKind::new(it.next()?.1);
+    for (col, c) in it {
+        let cur = CharKind::new(c);
+        if cur != CharKind::Space && prev != cur {
+            return Some(col);
+        }
+        prev = cur;
+    }
+    None
+}
+
+pub fn find_word_exclusive_end_forward(line: &str, start_col: usize) -> Option<usize> {
+    let mut it = line.chars().enumerate().skip(start_col);
+    let mut prev = CharKind::new(it.next()?.1);
+    for (col, c) in it {
+        let cur = CharKind::new(c);
+        if prev != CharKind::Space && prev != cur {
+            return Some(col);
+        }
+        prev = cur;
+    }
+    None
+}
+
+pub fn find_word_inclusive_end_forward(line: &str, start_col: usize) -> Option<usize> {
+    let mut it = line.chars().enumerate().skip(start_col);
+    let (mut last_col, c) = it.next()?;
+    let mut prev = CharKind::new(c);
+    for (col, c) in it {
+        let cur = CharKind::new(c);
+        if prev != CharKind::Space && cur != prev {
+            return Some(col.saturating_sub(1));
+        }
+        prev = cur;
+        last_col = col;
+    }
+    if prev != CharKind::Space {
+        Some(last_col)
+    } else {
+        None
+    }
+}
+
+pub fn find_word_start_backward(line: &str, start_col: usize) -> Option<usize> {
+    let idx = line
+        .char_indices()
+        .nth(start_col)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    let mut it = line[..idx].chars().rev().enumerate();
+    let mut cur = CharKind::new(it.next()?.1);
+    for (i, c) in it {
+        let next = CharKind::new(c);
+        if cur != CharKind::Space && next != cur {
+            return Some(start_col - i);
+        }
+        cur = next;
+    }
+    (cur != CharKind::Space).then(|| 0)
+}
+
+impl CursorMoveDirection {
+    pub fn next_cursor(
+        &self,
+        (row, col): (usize, usize),
+        lines: &[String],
+    ) -> Option<(usize, usize)> {
+        use CursorMoveDirection::*;
+
+        fn fit_col(col: usize, line: &str) -> usize {
+            cmp::min(col, line.chars().count())
+        }
+
+        match self {
+            Forward if col >= lines[row].chars().count() => {
+                (row + 1 < lines.len()).then(|| (row + 1, 0))
+            }
+            Forward => Some((row, col + 1)),
+            Back if col == 0 => {
+                let row = row.checked_sub(1)?;
+                Some((row, lines[row].chars().count()))
+            }
+            Back => Some((row, col - 1)),
+            Up => {
+                let row = row.checked_sub(1)?;
+                Some((row, fit_col(col, &lines[row])))
+            }
+            Down => Some((row + 1, fit_col(col, lines.get(row + 1)?))),
+            Head => Some((row, 0)),
+            End => Some((row, lines[row].chars().count())),
+            Top => Some((0, fit_col(col, &lines[0]))),
+            Bottom => {
+                let row = lines.len() - 1;
+                Some((row, fit_col(col, &lines[row])))
+            }
+            WordEnd => {
+                // `+ 1` for not accepting the current cursor position
+                if let Some(col) = find_word_inclusive_end_forward(&lines[row], col + 1) {
+                    Some((row, col))
+                } else {
+                    let mut row = row;
+                    loop {
+                        if row == lines.len() - 1 {
+                            break Some((row, lines[row].chars().count()));
+                        }
+                        row += 1;
+                        if let Some(col) = find_word_inclusive_end_forward(&lines[row], 0) {
+                            break Some((row, col));
+                        }
+                    }
+                }
+            }
+            WordForward => {
+                if let Some(col) = find_word_start_forward(&lines[row], col) {
+                    Some((row, col))
+                } else if row + 1 < lines.len() {
+                    Some((row + 1, 0))
+                } else {
+                    Some((row, lines[row].chars().count()))
+                }
+            }
+            WordBack => {
+                if let Some(col) = find_word_start_backward(&lines[row], col) {
+                    Some((row, col))
+                } else if row > 0 {
+                    Some((row - 1, lines[row - 1].chars().count()))
+                } else {
+                    Some((row, 0))
+                }
+            }
+            Jump(row, col) => {
+                let row = cmp::min(*row as usize, lines.len() - 1);
+                let col = fit_col(*col as usize, &lines[row]);
+                Some((row, col))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CursorMovement {
-    Regular(CursorMove),
+    Regular(CursorMoveDirection),
     Until(char),
     WholeLine,
 }
 
-impl TryFrom<CursorMovement> for CursorMove {
+impl TryFrom<CursorMovement> for CursorMoveDirection {
     type Error = ();
 
     fn try_from(value: CursorMovement) -> Result<Self, Self::Error> {
@@ -484,12 +564,12 @@ impl TryFrom<char> for CursorMovement {
     type Error = ();
     fn try_from(value: char) -> Result<Self, Self::Error> {
         match value {
-            'k' => Ok(Self::Regular(CursorMove::Up)),
-            'j' => Ok(Self::Regular(CursorMove::Down)),
-            '$' => Ok(Self::Regular(CursorMove::End)),
-            '0' => Ok(Self::Regular(CursorMove::Head)),
-            'h' => Ok(Self::Regular(CursorMove::Back)),
-            'l' => Ok(Self::Regular(CursorMove::Forward)),
+            'k' => Ok(Self::Regular(CursorMoveDirection::Up)),
+            'j' => Ok(Self::Regular(CursorMoveDirection::Down)),
+            '$' => Ok(Self::Regular(CursorMoveDirection::End)),
+            '0' => Ok(Self::Regular(CursorMoveDirection::Head)),
+            'h' => Ok(Self::Regular(CursorMoveDirection::Back)),
+            'l' => Ok(Self::Regular(CursorMoveDirection::Forward)),
             _ => Err(()),
         }
     }
@@ -502,15 +582,29 @@ impl TryFrom<char> for VimMotion {
             'i' => Ok(Self::Insert),
             'a' => Ok(Self::Append),
             'p' => Ok(Self::PasteClipboard),
-            'k' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Up))),
-            'j' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Down))),
-            'h' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Back))),
-            'l' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Forward))),
+            'k' => Ok(Self::Move(CursorMovement::Regular(CursorMoveDirection::Up))),
+            'j' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::Down,
+            ))),
+            'h' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::Back,
+            ))),
+            'l' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::Forward,
+            ))),
             'o' => Ok(Self::InsertNewLineDown),
-            '0' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Head))),
-            'G' => Ok(Self::Move(CursorMovement::Regular(CursorMove::Bottom))),
-            '$' => Ok(Self::Move(CursorMovement::Regular(CursorMove::End))),
-            'x' => Ok(Self::Delete(CursorMovement::Regular(CursorMove::Back))),
+            '0' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::Head,
+            ))),
+            'G' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::Bottom,
+            ))),
+            '$' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::End,
+            ))),
+            'x' => Ok(Self::Delete(CursorMovement::Regular(
+                CursorMoveDirection::Back,
+            ))),
             _ => Err(()),
         }
     }
@@ -525,7 +619,9 @@ impl TryFrom<[char; 3]> for VimMotion {
             ['d', 'f', ' '] => Err(()),
             ['d', 'f', third] => Ok(Self::Delete(CursorMovement::Until(third))),
             ['y', 'f', ' '] => Err(()),
-            ['g', 'g', ' '] => Ok(Self::Move(CursorMovement::Regular(CursorMove::Top))),
+            ['g', 'g', ' '] => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::Top,
+            ))),
             _ => Err(()),
         }
     }
@@ -564,7 +660,7 @@ pub enum EditorMode {
 }
 
 pub struct Editor<'editor> {
-    pub editor: TextArea<'editor>,
+    pub editor: EditorInner,
     colorscheme: EditorColorscheme,
     block: Block<'editor>,
     current_mode: EditorMode,
@@ -588,7 +684,7 @@ impl<'editor> Editor<'editor> {
             },
             selected: true,
             colorscheme: get_default_editor_colorscheme(),
-            editor: TextArea::from(start_state),
+            editor: start_state.into(),
         }
     }
 
@@ -714,22 +810,22 @@ impl<'editor> Editor<'editor> {
                 code: KeyCode::Up,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.editor.move_cursor(CursorMove::Up),
+            } => self.editor.move_cursor(CursorMoveDirection::Up),
             KeyEvent {
                 code: KeyCode::Down,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.editor.move_cursor(CursorMove::Down),
+            } => self.editor.move_cursor(CursorMoveDirection::Down),
             KeyEvent {
                 code: KeyCode::Left,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.editor.move_cursor(CursorMove::Back),
+            } => self.editor.move_cursor(CursorMoveDirection::Back),
             KeyEvent {
                 code: KeyCode::Right,
                 modifiers: KeyModifiers::NONE,
                 ..
-            } => self.editor.move_cursor(CursorMove::Forward),
+            } => self.editor.move_cursor(CursorMoveDirection::Forward),
             KeyEvent {
                 code: KeyCode::Esc,
                 modifiers: KeyModifiers::NONE,
@@ -773,7 +869,7 @@ impl<'editor> Editor<'editor> {
                 CursorMovement::WholeLine => {}
             },
             VimMotion::InsertNewLineDown => {
-                self.move_cursor(CursorMovement::Regular(CursorMove::End));
+                self.move_cursor(CursorMovement::Regular(CursorMoveDirection::End));
                 self.editor.insert_newline();
                 self.switch_to_insert_mode();
             }
@@ -928,7 +1024,7 @@ impl<'editor> Editor<'editor> {
     }
 
     fn move_cursor(&mut self, operator: CursorMovement) {
-        if let Ok(movement) = TryInto::<CursorMove>::try_into(operator.clone()) {
+        if let Ok(movement) = TryInto::<CursorMoveDirection>::try_into(operator.clone()) {
             self.editor.move_cursor(movement);
             return;
         }
@@ -937,10 +1033,10 @@ impl<'editor> Editor<'editor> {
         let (row, col) = self.editor.cursor();
         match operator {
             CursorMovement::Until(char) => {
-                let current_line = &lines[row][col..];
+                let current_line = &lines[row as usize][col as usize..];
                 if let Some(idx) = current_line.find(char) {
                     self.editor
-                        .move_cursor(CursorMove::Jump(row as u16, idx as u16))
+                        .move_cursor(CursorMoveDirection::Jump(row as u16, idx as u16))
                 }
             }
             _ => {}
@@ -959,12 +1055,14 @@ impl<'editor> StatefulWidgetRef for Editor<'editor> {
         let text_area = self.block.inner(area);
         self.block.clone().render(area, buf);
         let editor_area_height = text_area.height.saturating_sub(COMMAND_BAR_HEIGHT);
+
         let editor_area = Rect {
             x: text_area.x,
             y: text_area.y,
             width: text_area.width,
             height: editor_area_height,
         };
+
         let command_bar_area = Rect {
             x: text_area.x,
             y: text_area.y + editor_area_height, // Position immediately below the editor area

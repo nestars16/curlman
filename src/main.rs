@@ -11,17 +11,16 @@ use crossterm::{
     terminal::disable_raw_mode,
 };
 
-use editor::{InputListener, WidgetCommand};
+use editor::WidgetCommand;
 use jq_sys::{jq_init, jq_state, jq_teardown};
 use parser::parse_curlman_request_file;
-use ratatui::widgets::{ListState, StatefulWidgetRef};
 
 use ratatui::{
     layout::{Direction, Layout},
     prelude::*,
+    widgets::ListState,
     DefaultTerminal,
 };
-use tui_textarea::TextArea;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -61,7 +60,6 @@ impl Drop for App {
 //curl file uploads, basic auth and auth redirect
 
 pub mod keys {
-
     pub const UP: char = 'k';
     pub const DOWN: char = 'j';
     pub const LEFT: char = 'h';
@@ -343,6 +341,7 @@ fn main() -> Result<(), crate::error::Error> {
                 .split('\n')
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>();
+
             Some(lines)
         }
         None => None,

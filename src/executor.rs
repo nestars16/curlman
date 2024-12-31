@@ -3,25 +3,25 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
     fmt::Write,
     io::{Cursor, Read},
 };
-use tui_textarea::{CursorMove, TextArea};
 
 use crate::{
     editor::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
         get_round_bordered_box,
-        widget_common::fit_and_process_text_tokens_into_editor_window,
-        CurlmanWidget, CursorMovement, InputListener, VimCommand, VimMotion, WidgetCommand,
+        widget_common::EditorInner,
+        CurlmanWidget, CursorMoveDirection, CursorMovement, InputListener, VimMotion,
+        WidgetCommand,
     },
     error::Error,
     keys,
-    parser::{parse_json_editor, JsonToken},
     types::RequestInfo,
     AppState,
 };
@@ -37,7 +37,6 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Style, Stylize},
-    text::Text,
     widgets::{Block, StatefulWidgetRef, Widget},
 };
 
@@ -51,7 +50,7 @@ enum RequestExecutorView {
     Headers,
 }
 
-pub struct RequestExecutor<'widget> {
+pub struct RequestExecutor {
     header_paragraph_scroll: u16,
     block: Block<'static>,
     selected: bool,
@@ -60,13 +59,13 @@ pub struct RequestExecutor<'widget> {
     error: Option<Error>,
     handle: Easy,
     output_data: Vec<u8>,
-    editor: TextArea<'widget>,
+    editor: EditorInner,
     headers: HashMap<HeaderName, String>,
     request: Option<RequestInfo>,
     view: RequestExecutorView,
 }
 
-impl<'widget> RequestExecutor<'_> {
+impl RequestExecutor {
     pub fn new() -> Self {
         Self {
             header_paragraph_scroll: 0,
@@ -80,7 +79,7 @@ impl<'widget> RequestExecutor<'_> {
             json_formatter: JsonFormatter {
                 colorscheme: get_default_output_colorscheme(),
             },
-            editor: TextArea::default(),
+            editor: EditorInner::new(),
             body_cursor: None,
             error: None,
         }
@@ -201,12 +200,12 @@ impl<'widget> RequestExecutor<'_> {
             RequestExecutorView::RequestBody => self.move_cursor(operator),
             RequestExecutorView::Headers => match operator {
                 CursorMovement::Regular(movement) => match movement {
-                    CursorMove::Up => {
+                    CursorMoveDirection::Up => {
                         if self.header_paragraph_scroll >= 1 {
                             self.header_paragraph_scroll -= 1;
                         }
                     }
-                    CursorMove::Down => {
+                    CursorMoveDirection::Down => {
                         self.header_paragraph_scroll += 1;
                     }
                     _ => {}
@@ -223,7 +222,7 @@ impl<'widget> RequestExecutor<'_> {
         match perform_request_result {
             Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
                 Some(content_type) if content_type.as_str().contains("application/json") => {
-                    self.editor = TextArea::from(
+                    self.editor = EditorInner::from(
                         self.json_formatter
                             .format_output_data_into_lines(&self.output_data)
                             .unwrap_or(vec!["Json formatting failed".to_string()]),
@@ -234,7 +233,8 @@ impl<'widget> RequestExecutor<'_> {
                         .to_string()
                         .split('\n')
                         .map(|str| str.to_string())
-                        .collect();
+                        .collect::<Vec<_>>()
+                        .into();
                 }
             },
             Err(e) => self.error = Some(e),
@@ -243,7 +243,7 @@ impl<'widget> RequestExecutor<'_> {
     }
 
     fn move_cursor(&mut self, operator: CursorMovement) {
-        if let Ok(movement) = TryInto::<CursorMove>::try_into(operator.clone()) {
+        if let Ok(movement) = TryInto::<CursorMoveDirection>::try_into(operator.clone()) {
             self.editor.move_cursor(movement);
             return;
         }
@@ -252,10 +252,10 @@ impl<'widget> RequestExecutor<'_> {
         let (row, col) = self.editor.cursor();
         match operator {
             CursorMovement::Until(char) => {
-                let current_line = &lines[row][col..];
+                let current_line = &lines[row as usize][col as usize..];
                 if let Some(idx) = current_line.find(char) {
                     self.editor
-                        .move_cursor(CursorMove::Jump(row as u16, idx as u16))
+                        .move_cursor(CursorMoveDirection::Jump(row as u16, idx as u16))
                 }
             }
             _ => {}
@@ -263,7 +263,7 @@ impl<'widget> RequestExecutor<'_> {
     }
 }
 
-impl<'widget> StatefulWidgetRef for RequestExecutor<'widget> {
+impl<'widget> StatefulWidgetRef for RequestExecutor {
     #[doc = " State associated with the stateful widget."]
     #[doc = ""]
     #[doc = " If you don\'t need this then you probably want to implement [`WidgetRef`] instead."]
@@ -295,7 +295,7 @@ impl<'widget> StatefulWidgetRef for RequestExecutor<'widget> {
 
         match self.view {
             RequestExecutorView::RequestBody => {
-                self.editor.render(text_area, buf);
+                //self.editor.render(text_area, buf);
             }
             RequestExecutorView::Headers => {
                 let mut paragraph_buf = String::new();
@@ -314,25 +314,30 @@ impl<'widget> StatefulWidgetRef for RequestExecutor<'widget> {
     }
 }
 
-impl<'widget> InputListener for RequestExecutor<'widget> {
+impl<'widget> InputListener for RequestExecutor {
     fn handle_event(&mut self, e: crossterm::event::Event) -> Option<WidgetCommand> {
         match e {
             crossterm::event::Event::Key(key_event) => match key_event {
                 KeyEvent {
                     code: KeyCode::Up, ..
-                } => self.move_cursor_or_headers(CursorMovement::Regular(CursorMove::Up)),
+                } => self.move_cursor_or_headers(CursorMovement::Regular(CursorMoveDirection::Up)),
                 KeyEvent {
                     code: KeyCode::Down,
                     ..
-                } => self.move_cursor_or_headers(CursorMovement::Regular(CursorMove::Down)),
+                } => {
+                    self.move_cursor_or_headers(CursorMovement::Regular(CursorMoveDirection::Down))
+                }
                 KeyEvent {
                     code: KeyCode::Left,
                     ..
-                } => self.move_cursor_or_headers(CursorMovement::Regular(CursorMove::Back)),
+                } => {
+                    self.move_cursor_or_headers(CursorMovement::Regular(CursorMoveDirection::Back))
+                }
                 KeyEvent {
                     code: KeyCode::Right,
                     ..
-                } => self.move_cursor_or_headers(CursorMovement::Regular(CursorMove::Forward)),
+                } => self
+                    .move_cursor_or_headers(CursorMovement::Regular(CursorMoveDirection::Forward)),
                 KeyEvent {
                     code: KeyCode::Char(ch),
                     modifiers: KeyModifiers::CONTROL,
@@ -386,7 +391,7 @@ impl<'widget> InputListener for RequestExecutor<'widget> {
     }
 }
 
-impl<'widget> CurlmanWidget for RequestExecutor<'widget> {
+impl<'widget> CurlmanWidget for RequestExecutor {
     fn toggle_selected(&mut self) {
         self.selected = !self.selected;
         if self.selected {
@@ -444,6 +449,8 @@ impl JsonFormatter {
 
         Ok(jv_output_string.split('\n').map(|l| l.to_owned()).collect())
     }
+
+    /*
 
     pub fn format_lines_into_text<'a>(
         &self,
@@ -518,11 +525,11 @@ impl JsonFormatter {
 
         Text::from(lines)
     }
+    */
 }
 
 mod tests {
-    use super::JsonFormatter;
-    use crate::editor::colors::get_default_output_colorscheme;
+    use crate::{editor::colors::get_default_output_colorscheme, executor::JsonFormatter};
     use jq_sys::{jq_init, jq_teardown};
 
     #[test]
