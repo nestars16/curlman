@@ -613,7 +613,7 @@ fn parse_json_editor_line<'a>(
     ret
 }
 
-pub fn parse_json_editor(input: &Vec<String>) -> Vec<Vec<JsonToken>> {
+pub fn parse_request_json(input: &Vec<String>) -> Vec<Vec<JsonToken>> {
     let mut parser = JsonParser {
         current_state: JsonParserState::AwaitingValue,
         context_stack: Vec::new(),
@@ -638,7 +638,6 @@ pub fn parse_json_editor(input: &Vec<String>) -> Vec<Vec<JsonToken>> {
         }
         token_lines.push(line_tokens)
     }
-
     token_lines
 }
 

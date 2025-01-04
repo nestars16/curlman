@@ -18,10 +18,11 @@ use crate::{
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
         get_round_bordered_box,
         widget_common::EditorInner,
-        CurlmanWidget, InputListener, VimMotion, WidgetCommand,
+        CurlmanWidget, InputListener, WidgetCommand,
     },
     error::Error,
     keys,
+    parser::{parse_request_json, JsonToken},
     types::RequestInfo,
     AppState,
 };
@@ -55,7 +56,6 @@ pub struct RequestExecutor {
     block: Block<'static>,
     selected: bool,
     body_cursor: Option<Cursor<Vec<u8>>>,
-    json_formatter: JsonFormatter,
     error: Option<Error>,
     handle: Easy,
     output_data: Vec<u8>,
@@ -76,9 +76,6 @@ impl RequestExecutor {
             request: None,
             headers: HashMap::new(),
             handle: Easy::new(),
-            json_formatter: JsonFormatter {
-                colorscheme: get_default_output_colorscheme(),
-            },
             editor: EditorInner::new(),
             body_cursor: None,
             error: None,
@@ -223,10 +220,11 @@ impl RequestExecutor {
             Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
                 Some(content_type) if content_type.as_str().contains("application/json") => {
                     self.editor = EditorInner::from(
-                        self.json_formatter
-                            .format_output_data_into_lines(&self.output_data)
+                        JsonFormatter::format_output_data_into_lines(&self.output_data)
                             .unwrap_or(vec!["Json formatting failed".to_string()]),
-                    )
+                    );
+
+                    self.editor.text_renderer = Some(JsonFormatter::json_tokenizer_spans);
                 }
                 _ => {
                     self.editor = String::from_utf8_lossy(&self.output_data)
@@ -235,6 +233,8 @@ impl RequestExecutor {
                         .map(|str| str.to_string())
                         .collect::<Vec<_>>()
                         .into();
+
+                    self.editor.text_renderer = None
                 }
             },
             Err(e) => self.error = Some(e),
@@ -347,9 +347,6 @@ impl<'widget> InputListener for RequestExecutor {
                     code: KeyCode::Char(ch),
                     ..
                 } => {
-                    if let Ok(VimMotion::Move(movement)) = ch.try_into() {
-                        self.move_cursor(movement);
-                    }
                     match ch {
                         'E' => {
                             return self.perform_request();
@@ -411,12 +408,10 @@ impl<'widget> CurlmanWidget for RequestExecutor {
     }
 }
 
-struct JsonFormatter {
-    pub colorscheme: JsonOutputColorscheme,
-}
+struct JsonFormatter {}
 
 impl JsonFormatter {
-    fn format_output_data_into_lines(&self, input: &[u8]) -> Result<Vec<String>, FormatterError> {
+    pub fn format_output_data_into_lines(input: &[u8]) -> Result<Vec<String>, FormatterError> {
         let input_str = CString::new(input).map_err(|_| FormatterError::InvalidInput)?;
         let input_jv = unsafe { jv_parse(input_str.as_ptr()) };
         let jv_kind = unsafe { jv_get_kind(input_jv) };
@@ -450,37 +445,31 @@ impl JsonFormatter {
         Ok(jv_output_string.split('\n').map(|l| l.to_owned()).collect())
     }
 
-    /*
+    fn split_token(token_str: &str, remaining_space: usize) -> (&str, &str) {
+        let cutoff_char = token_str.char_indices().take(remaining_space + 1).last();
 
-    pub fn format_lines_into_text<'a>(
-        &self,
-        editor_lines: &'a Vec<String>,
+        if let Some((end_idx, _)) = cutoff_char {
+            return (&token_str[..end_idx], &token_str[end_idx..]);
+        }
+
+        unreachable!();
+    }
+
+    pub fn json_tokenizer_spans<'a>(
+        lines: &'a Vec<String>,
         area: Rect,
-        top_row: usize,
-        editor_col: usize,
-        editor_row: usize,
-        selected: bool,
-    ) -> Text<'a> {
-        let tokenized_lines = parse_json_editor(editor_lines);
-        let mut lines = Vec::new();
-        let mut spans = Vec::new();
-        let mut is_cursor_set = false;
+        (row, col): (usize, usize),
+    ) -> Vec<Line<'a>> {
+        let colorscheme = get_default_output_colorscheme();
+        let tokenized_lines = parse_request_json(lines);
+        let width = area.width as usize;
+        let mut lines = vec![];
 
-        for (idx, line) in tokenized_lines.iter().enumerate() {
-            if idx < top_row as usize || idx >= top_row as usize + area.height as usize {
-                continue;
-            }
-
-            let mut current_col = 0;
+        for line in tokenized_lines {
+            let mut line_spans = vec![];
+            let mut remaining_space = area.width as usize;
 
             for token in line {
-                let color = token.get_color(&self.colorscheme);
-                let line_token_len = token.get_str().len();
-                let line_token_end = (current_col + line_token_len).checked_sub(1).unwrap_or(0);
-
-                let cursor_has_to_be_set =
-                    selected && !is_cursor_set && idx == editor_row && line_token_end >= editor_col;
-
                 match token {
                     JsonToken::ObjectBracket(text)
                     | JsonToken::ArrayBracket(text)
@@ -491,41 +480,38 @@ impl JsonFormatter {
                     | JsonToken::String(text)
                     | JsonToken::Whitespace(text)
                     | JsonToken::Invalid(text) => {
-                        fit_and_process_text_tokens_into_editor_window(
-                            editor_col,
-                            text,
-                            color,
-                            area.width - 2,
-                            cursor_has_to_be_set,
-                            &mut is_cursor_set,
-                            &mut current_col,
-                            &mut lines,
-                            &mut spans,
-                        );
+                        let color = token.get_color(&colorscheme);
+
+                        if remaining_space.checked_sub(text.chars().count()).is_none() {
+                            let (curr_line_chunk, mut next_line_chunk) =
+                                Self::split_token(text, remaining_space);
+
+                            line_spans.push(Span::raw(curr_line_chunk).fg(color));
+                            lines.push(Line::from(std::mem::take(&mut line_spans)));
+
+                            while let Some((idx, _)) = next_line_chunk.char_indices().nth(width + 1)
+                            {
+                                lines.push(Line::from(&next_line_chunk[..idx]).fg(color));
+                                next_line_chunk = &next_line_chunk[idx..];
+                            }
+
+                            line_spans.push(Span::raw(next_line_chunk).fg(color));
+                            remaining_space -= next_line_chunk.chars().count();
+                        } else {
+                            line_spans.push(Span::raw(text).fg(color));
+                            remaining_space -= text.chars().count();
+                        }
                     }
                 }
-
-                current_col += line_token_len;
             }
 
-            if idx == editor_row && editor_col == editor_lines[editor_row].len() {
-                if editor_col as u16 == area.width {
-                    lines.push(Line::from(std::mem::take(&mut spans)));
-                }
-
-                spans.push(Span::raw(" ").reversed());
+            if !line_spans.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut line_spans)));
             }
-
-            lines.push(Line::from(std::mem::take(&mut spans)));
         }
 
-        if !spans.is_empty() {
-            lines.push(Line::from(std::mem::take(&mut spans)));
-        }
-
-        Text::from(lines)
+        lines
     }
-    */
 }
 
 mod tests {
@@ -538,11 +524,8 @@ mod tests {
         if jq_state.is_null() {
             panic!("Couldn't initialize jq");
         }
-        let formatter = JsonFormatter {
-            colorscheme: get_default_output_colorscheme(),
-        };
         let input = "{\"name\" : \"John\", \"age\": 30}";
-        let result = formatter.format_output_data_into_lines(input.as_bytes());
+        let result = JsonFormatter::format_output_data_into_lines(input.as_bytes());
 
         let Ok(lines) = result else {
             panic!("Formatting output failed");

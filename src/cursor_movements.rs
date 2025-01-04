@@ -16,73 +16,40 @@ pub enum CursorMoveDirection {
     Jump(u16, u16),
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum CharKind {
-    Space,
-    Punct,
-    Other,
-}
-
-impl CharKind {
-    fn new(c: char) -> Self {
-        if c.is_whitespace() {
-            Self::Space
-        } else if c.is_ascii_punctuation() {
-            Self::Punct
-        } else {
-            Self::Other
+fn find_word_forward_pos(line: &str) -> Option<usize> {
+    let mut in_whitespace = line.chars().next()?.is_whitespace();
+    for (idx, ch) in line.char_indices() {
+        if in_whitespace && !ch.is_whitespace() {
+            return Some(idx);
         }
-    }
-}
-
-pub fn find_word_start_forward(line: &str, start_col: usize) -> Option<usize> {
-    let mut it = line.chars().enumerate().skip(start_col);
-    let mut prev = CharKind::new(it.next()?.1);
-    for (col, c) in it {
-        let cur = CharKind::new(c);
-        if cur != CharKind::Space && prev != cur {
-            return Some(col);
-        }
-        prev = cur;
+        in_whitespace = ch.is_whitespace();
     }
     None
 }
 
-pub fn find_word_inclusive_end_forward(line: &str, start_col: usize) -> Option<usize> {
-    let mut it = line.chars().enumerate().skip(start_col);
-    let (mut last_col, c) = it.next()?;
-    let mut prev = CharKind::new(c);
-    for (col, c) in it {
-        let cur = CharKind::new(c);
-        if prev != CharKind::Space && cur != prev {
-            return Some(col.saturating_sub(1));
+fn find_word_backward_pos(line: &str) -> Option<usize> {
+    let mut in_whitespace = line.chars().last()?.is_whitespace();
+    for (idx, ch) in line.char_indices().rev() {
+        if !in_whitespace && ch.is_whitespace() {
+            return Some(idx + 1); // +1 to point to the start of the word
         }
-        prev = cur;
-        last_col = col;
+        in_whitespace = ch.is_whitespace();
     }
-    if prev != CharKind::Space {
-        Some(last_col)
-    } else {
-        None
-    }
+    None
 }
 
-pub fn find_word_start_backward(line: &str, start_col: usize) -> Option<usize> {
-    let idx = line
-        .char_indices()
-        .nth(start_col)
-        .map(|(i, _)| i)
-        .unwrap_or(line.len());
-    let mut it = line[..idx].chars().rev().enumerate();
-    let mut cur = CharKind::new(it.next()?.1);
-    for (i, c) in it {
-        let next = CharKind::new(c);
-        if cur != CharKind::Space && next != cur {
-            return Some(start_col - i);
+fn find_word_end_pos(line: &str) -> Option<usize> {
+    for (idx, ch) in line.char_indices() {
+        if ch.is_ascii_punctuation()
+            || line[idx..]
+                .chars()
+                .nth(1)
+                .map_or(true, |next_ch| next_ch.is_whitespace())
+        {
+            return Some(idx);
         }
-        cur = next;
     }
-    (cur != CharKind::Space).then(|| 0)
+    None
 }
 
 impl CursorMoveDirection {
@@ -119,10 +86,12 @@ impl CursorMoveDirection {
             Forward if col >= lines[row].len() => (row + 1 < lines.len()).then(|| (row + 1, 0)),
             Forward => {
                 let mut bytes_forward = 1;
+
                 while !lines[row].is_char_boundary(col + bytes_forward) {
                     bytes_forward += 1
                 }
-                Some((row, col + bytes_forward))
+
+                Some(dbg!((row, col + bytes_forward)))
             }
             Back if col == 0 => {
                 let row = row.checked_sub(1)?;
@@ -132,7 +101,7 @@ impl CursorMoveDirection {
                 let current_line = lines[row].as_str();
                 let mut bytes_backward = 1;
                 while !current_line.is_char_boundary(col - bytes_backward) {
-                    bytes_backward -= 1
+                    bytes_backward += 1
                 }
                 Some((row, col.checked_sub(bytes_backward)?))
             }
@@ -148,10 +117,23 @@ impl CursorMoveDirection {
                 let row = lines.len() - 1;
                 Some((row, fit_col(col, &lines[row])))
             }
-            WordForward => None,
-            WordEnd => None,
-            WordBack => None,
-            Jump(_, _) => None,
+            WordForward => {
+                let rest_of_line = &lines[row][col..];
+                Some((row, find_word_forward_pos(rest_of_line)?))
+            }
+            WordEnd => {
+                let rest_of_line = &lines[row][col..];
+                Some((row, find_word_end_pos(rest_of_line)?))
+            }
+            WordBack => {
+                let rest_of_line = &lines[row][..col];
+                Some((row, find_word_backward_pos(rest_of_line)?))
+            }
+            Jump(row, col) => {
+                let row = cmp::min(*row as usize, lines.len() - 1);
+                let col = fit_col(*col as usize, &lines[row]);
+                Some((row, col))
+            }
         }
     }
 }

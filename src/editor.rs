@@ -32,15 +32,15 @@ pub mod widget_common {
     pub struct EditorInner {
         pub lines: Vec<String>,
         pub cursor: (usize, usize),
-        pub tokenizer: Option<fn(&Vec<String>, Rect) -> Vec<Line<'_>>>,
+        pub text_renderer: Option<fn(&Vec<String>, Rect, (usize, usize)) -> Vec<Line<'_>>>,
     }
 
     impl WidgetRef for EditorInner {
         #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
         #[doc = " to implement a custom widget."]
         fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-            Text::from(match self.tokenizer {
-                Some(tokenizer) => tokenizer(&self.lines, area),
+            Text::from(match self.text_renderer {
+                Some(tokenizer) => tokenizer(&self.lines, area, self.cursor),
                 None => self.wrap_editor_lines_no_color(area),
             })
             .render(area, buf)
@@ -50,7 +50,7 @@ pub mod widget_common {
     impl EditorInner {
         pub fn new() -> Self {
             Self {
-                tokenizer: None,
+                text_renderer: None,
                 lines: Vec::new(),
                 cursor: (0, 0),
             }
@@ -233,7 +233,7 @@ pub mod widget_common {
     impl From<Vec<String>> for EditorInner {
         fn from(value: Vec<String>) -> Self {
             Self {
-                tokenizer: None,
+                text_renderer: None,
                 lines: value,
                 cursor: (0, 0),
             }
