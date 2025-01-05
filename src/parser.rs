@@ -380,7 +380,11 @@ pub fn parse_curlman_editor<'a>(input: &'a Vec<String>) -> Vec<Vec<CurlmanToken<
                 }
             }
         }
-        editor_tokens.push(std::mem::take(&mut line_tokens));
+        if !line_tokens.is_empty() {
+            editor_tokens.push(std::mem::take(&mut line_tokens));
+        } else {
+            editor_tokens.push(vec![CurlmanToken::Whitespace("")]);
+        }
     }
 
     editor_tokens

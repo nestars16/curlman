@@ -2,6 +2,7 @@ use crate::{
     cursor_movements::{CursorMoveDirection, CursorMovement},
     error::Error,
     keys,
+    parser::{parse_curlman_editor, CurlmanToken},
     types::RequestInfo,
     AppState,
 };
@@ -14,14 +15,14 @@ use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, List, StatefulWidgetRef},
 };
-use widget_common::EditorInner;
+use widget_common::{fit_tokens_into_editor, EditorInner};
 
 pub mod widget_common {
 
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::Stylize,
+        style::{Color, Stylize},
         text::{Line, Span, Text},
         widgets::{Widget, WidgetRef},
     };
@@ -53,6 +54,16 @@ pub mod widget_common {
                 text_renderer: None,
                 lines: Vec::new(),
                 cursor: (0, 0),
+            }
+        }
+
+        pub fn with_renderer(
+            self,
+            text_renderer: fn(&Vec<String>, Rect, (usize, usize)) -> Vec<Line<'_>>,
+        ) -> Self {
+            Self {
+                text_renderer: Some(text_renderer),
+                ..self
             }
         }
 
@@ -228,6 +239,181 @@ pub mod widget_common {
 
             line_segments
         }
+    }
+
+    fn split_token(token_str: &str, remaining_space: usize) -> (&str, &str) {
+        let cutoff_char = token_str.char_indices().take(remaining_space + 1).last();
+
+        if let Some((end_idx, _)) = cutoff_char {
+            return (&token_str[..end_idx], &token_str[end_idx..]);
+        }
+
+        unreachable!();
+    }
+
+    enum TokenWrap<'text> {
+        NoOverflow((Vec<Span<'text>>, usize)),
+        Overflow((Vec<Span<'text>>, Vec<Vec<Span<'text>>>, usize)),
+    }
+
+    fn separate_cursor_slice(text: &str) -> Option<(&str, &str)> {
+        if text.is_empty() {
+            return None;
+        }
+
+        if let Some((_, ch)) = text.char_indices().take(1).last() {
+            return Some((&text[..ch.len_utf8()], &text[ch.len_utf8()..]));
+        }
+
+        None
+    }
+
+    fn separate_cursor_slice_and_append<'editor_token>(
+        token: &str,
+        at_and_after_cursor: &'editor_token str,
+        mut remaining_space: usize,
+        width: usize,
+        color: Color,
+        lines: &mut Vec<Line<'editor_token>>,
+        line_spans: &mut Vec<Span<'editor_token>>,
+    ) -> usize {
+        use std::mem::take;
+        match separate_cursor_slice(at_and_after_cursor) {
+            Some((cursor_str, rest)) => {
+                if remaining_space < 1 {
+                    lines.push(Line::from(take(line_spans)));
+                    line_spans.push(Span::raw(cursor_str).reversed());
+                    remaining_space = width - 1;
+                } else {
+                    line_spans.push(Span::raw(cursor_str).reversed());
+                    remaining_space -= 1;
+                }
+
+                remaining_space = fit_text_and_append_to_lines(
+                    rest,
+                    remaining_space,
+                    color,
+                    width,
+                    line_spans,
+                    lines,
+                );
+
+                remaining_space
+            }
+            None => remaining_space,
+        }
+    }
+
+    fn fit_text_and_append_to_lines<'editor_token>(
+        text: &'editor_token str,
+        remaining_space: usize,
+        color: Color,
+        width: usize,
+        line_spans: &mut Vec<Span<'editor_token>>,
+        lines: &mut Vec<Line<'editor_token>>,
+    ) -> usize {
+        let token_fit_res =
+            fit_token_in_remaining_space_no_cursor(text, remaining_space, color, width);
+
+        extend_lines_and_line_spans_no_cursor(token_fit_res, line_spans, lines)
+    }
+
+    fn fit_token_in_remaining_space_no_cursor(
+        text: &str,
+        remaining_space: usize,
+        color: Color,
+        width: usize,
+    ) -> TokenWrap<'_> {
+        if remaining_space.checked_sub(text.chars().count()).is_none() {
+            let (curr_line_chunk, mut next_line_chunk) = split_token(text, remaining_space);
+            let curr_line_span = Span::raw(curr_line_chunk).fg(color);
+            let mut overflowed_lines = vec![];
+            while let Some((idx, _)) = next_line_chunk.char_indices().nth(width) {
+                overflowed_lines.push(vec![Span::raw(&next_line_chunk[..idx]).fg(color)]);
+                next_line_chunk = &next_line_chunk[idx..];
+            }
+
+            overflowed_lines.push(vec![Span::raw(next_line_chunk).fg(color)]);
+            TokenWrap::Overflow((
+                vec![curr_line_span],
+                overflowed_lines,
+                width - next_line_chunk.chars().count(),
+            ))
+        } else {
+            let line_span = Span::raw(text).fg(color);
+            TokenWrap::NoOverflow((vec![line_span], remaining_space - text.chars().count()))
+        }
+    }
+
+    fn extend_lines_and_line_spans_no_cursor<'editor_token>(
+        token_fit_res: TokenWrap<'editor_token>,
+        line_spans: &mut Vec<Span<'editor_token>>,
+        lines: &mut Vec<Line<'editor_token>>,
+    ) -> usize {
+        use std::mem::take;
+        match token_fit_res {
+            TokenWrap::NoOverflow((line_span, space_left)) => {
+                line_spans.extend(line_span);
+                space_left
+            }
+            TokenWrap::Overflow((line_span, mut overflow_lines, space_left)) => {
+                line_spans.extend(line_span);
+                lines.push(Line::from(take(line_spans)));
+
+                if let Some(tail) = overflow_lines.pop() {
+                    for line in overflow_lines {
+                        lines.push(Line::from(line))
+                    }
+
+                    line_spans.extend(tail);
+                }
+
+                space_left
+            }
+        }
+    }
+
+    pub fn fit_tokens_into_editor<'editor_token>(
+        text: &'editor_token str,
+        (row, col): (usize, usize),
+        row_idx: usize,
+        color: Color,
+        width: usize,
+        mut remaining_space: usize,
+        mut render_col_offset: usize,
+        line_spans: &mut Vec<Span<'editor_token>>,
+        lines: &mut Vec<Line<'editor_token>>,
+    ) -> (usize, usize) {
+        let text_len = text.len();
+        if row == row_idx && col >= render_col_offset && render_col_offset + text_len > col {
+            let cursor_col_relative = col - render_col_offset;
+            let (before_cursor, at_and_after_cursor) = text.split_at(cursor_col_relative);
+
+            remaining_space = fit_text_and_append_to_lines(
+                before_cursor,
+                remaining_space,
+                color,
+                width,
+                line_spans,
+                lines,
+            );
+
+            remaining_space = separate_cursor_slice_and_append(
+                text,
+                at_and_after_cursor,
+                remaining_space,
+                width,
+                color,
+                lines,
+                line_spans,
+            )
+        } else {
+            remaining_space =
+                fit_text_and_append_to_lines(text, remaining_space, color, width, line_spans, lines)
+        }
+
+        render_col_offset += text_len;
+        (remaining_space, render_col_offset)
     }
 
     impl From<Vec<String>> for EditorInner {
@@ -493,7 +679,8 @@ impl<'editor> Editor<'editor> {
             },
             selected: true,
             colorscheme: get_default_editor_colorscheme(),
-            editor: start_state.into(),
+            editor: Into::<EditorInner>::into(start_state)
+                .with_renderer(Self::editor_tokenizer_spans),
         }
     }
 
@@ -770,6 +957,59 @@ impl<'editor> Editor<'editor> {
             }
             _ => {}
         }
+    }
+
+    fn editor_tokenizer_spans<'a>(
+        lines: &'a Vec<String>,
+        area: Rect,
+        (row, col): (usize, usize),
+    ) -> Vec<Line<'a>> {
+        use std::mem::take;
+        let colorscheme = get_default_editor_colorscheme();
+        let tokenized_lines = parse_curlman_editor(lines);
+
+        let width = area.width as usize;
+        let mut lines = vec![];
+        let mut line_spans = vec![];
+
+        for (idx, line) in tokenized_lines.into_iter().enumerate() {
+            let mut remaining_space = area.width as usize;
+            let mut render_col_offset = 0;
+            for token in line {
+                match token {
+                    CurlmanToken::Curl(text)
+                    | CurlmanToken::Url(text)
+                    | CurlmanToken::ParamKey(text)
+                    | CurlmanToken::ParamValue(text)
+                    | CurlmanToken::Whitespace(text)
+                    | CurlmanToken::Separator(text)
+                    | CurlmanToken::Unknown(text) => {
+                        let color = token.get_color(&colorscheme);
+                        (remaining_space, render_col_offset) = fit_tokens_into_editor(
+                            text,
+                            (row, col),
+                            idx,
+                            color,
+                            width,
+                            remaining_space,
+                            render_col_offset,
+                            &mut line_spans,
+                            &mut lines,
+                        );
+                    }
+                }
+            }
+
+            if idx == row && col == render_col_offset {
+                line_spans.push(Span::raw(" ").reversed());
+            }
+
+            if !line_spans.is_empty() {
+                lines.push(Line::from(take(&mut line_spans)));
+            }
+        }
+
+        lines
     }
 }
 impl<'editor> StatefulWidgetRef for Editor<'editor> {

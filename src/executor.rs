@@ -17,7 +17,7 @@ use crate::{
         self,
         colors::{get_default_output_colorscheme, JsonOutputColorscheme},
         get_round_bordered_box,
-        widget_common::EditorInner,
+        widget_common::{fit_tokens_into_editor, EditorInner},
         CurlmanWidget, InputListener, WidgetCommand,
     },
     error::Error,
@@ -229,6 +229,8 @@ impl RequestExecutor {
                 _ => {
                     self.editor = String::from_utf8_lossy(&self.output_data)
                         .to_string()
+                        .replace("\t", "  ")
+                        .replace("\r\n", "\n")
                         .split('\n')
                         .map(|str| str.to_string())
                         .collect::<Vec<_>>()
@@ -445,30 +447,21 @@ impl JsonFormatter {
         Ok(jv_output_string.split('\n').map(|l| l.to_owned()).collect())
     }
 
-    fn split_token(token_str: &str, remaining_space: usize) -> (&str, &str) {
-        let cutoff_char = token_str.char_indices().take(remaining_space + 1).last();
-
-        if let Some((end_idx, _)) = cutoff_char {
-            return (&token_str[..end_idx], &token_str[end_idx..]);
-        }
-
-        unreachable!();
-    }
-
     pub fn json_tokenizer_spans<'a>(
         lines: &'a Vec<String>,
         area: Rect,
         (row, col): (usize, usize),
     ) -> Vec<Line<'a>> {
+        use std::mem::take;
         let colorscheme = get_default_output_colorscheme();
         let tokenized_lines = parse_request_json(lines);
         let width = area.width as usize;
         let mut lines = vec![];
+        let mut line_spans = vec![];
 
-        for line in tokenized_lines {
-            let mut line_spans = vec![];
+        for (idx, line) in tokenized_lines.into_iter().enumerate() {
             let mut remaining_space = area.width as usize;
-
+            let mut render_col_offset = 0;
             for token in line {
                 match token {
                     JsonToken::ObjectBracket(text)
@@ -482,31 +475,27 @@ impl JsonFormatter {
                     | JsonToken::Invalid(text) => {
                         let color = token.get_color(&colorscheme);
 
-                        if remaining_space.checked_sub(text.chars().count()).is_none() {
-                            let (curr_line_chunk, mut next_line_chunk) =
-                                Self::split_token(text, remaining_space);
-
-                            line_spans.push(Span::raw(curr_line_chunk).fg(color));
-                            lines.push(Line::from(std::mem::take(&mut line_spans)));
-
-                            while let Some((idx, _)) = next_line_chunk.char_indices().nth(width + 1)
-                            {
-                                lines.push(Line::from(&next_line_chunk[..idx]).fg(color));
-                                next_line_chunk = &next_line_chunk[idx..];
-                            }
-
-                            line_spans.push(Span::raw(next_line_chunk).fg(color));
-                            remaining_space -= next_line_chunk.chars().count();
-                        } else {
-                            line_spans.push(Span::raw(text).fg(color));
-                            remaining_space -= text.chars().count();
-                        }
+                        (remaining_space, render_col_offset) = fit_tokens_into_editor(
+                            text,
+                            (row, col),
+                            idx,
+                            color,
+                            width,
+                            remaining_space,
+                            render_col_offset,
+                            &mut line_spans,
+                            &mut lines,
+                        );
                     }
                 }
             }
 
+            if idx == row && col == render_col_offset {
+                line_spans.push(Span::raw(" ").reversed());
+            }
+
             if !line_spans.is_empty() {
-                lines.push(Line::from(std::mem::take(&mut line_spans)));
+                lines.push(Line::from(take(&mut line_spans)));
             }
         }
 

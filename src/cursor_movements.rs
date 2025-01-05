@@ -91,7 +91,7 @@ impl CursorMoveDirection {
                     bytes_forward += 1
                 }
 
-                Some(dbg!((row, col + bytes_forward)))
+                Some((row, col + bytes_forward))
             }
             Back if col == 0 => {
                 let row = row.checked_sub(1)?;
