@@ -18,6 +18,7 @@ use ratatui::{
 use widget_common::{fit_tokens_into_editor, EditorInner};
 
 pub mod widget_common {
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     use ratatui::{
         buffer::Buffer,
@@ -33,15 +34,18 @@ pub mod widget_common {
     pub struct EditorInner {
         pub lines: Vec<String>,
         pub cursor: (usize, usize),
-        pub text_renderer: Option<fn(&Vec<String>, Rect, (usize, usize)) -> Vec<Line<'_>>>,
+        pub top_row: usize,
+        pub height: AtomicU16,
+        pub text_renderer: Option<fn(&Vec<String>, Rect, (usize, usize), usize) -> Vec<Line<'_>>>,
     }
 
     impl WidgetRef for EditorInner {
         #[doc = " Draws the current state of the widget in the given buffer. That is the only method required"]
         #[doc = " to implement a custom widget."]
         fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+            self.height.store(area.height, Ordering::Relaxed);
             Text::from(match self.text_renderer {
-                Some(tokenizer) => tokenizer(&self.lines, area, self.cursor),
+                Some(tokenizer) => tokenizer(&self.lines, area, self.cursor, self.top_row),
                 None => self.wrap_editor_lines_no_color(area),
             })
             .render(area, buf)
@@ -54,12 +58,14 @@ pub mod widget_common {
                 text_renderer: None,
                 lines: Vec::new(),
                 cursor: (0, 0),
+                top_row: 0,
+                height: AtomicU16::new(0),
             }
         }
 
         pub fn with_renderer(
             self,
-            text_renderer: fn(&Vec<String>, Rect, (usize, usize)) -> Vec<Line<'_>>,
+            text_renderer: fn(&Vec<String>, Rect, (usize, usize), usize) -> Vec<Line<'_>>,
         ) -> Self {
             Self {
                 text_renderer: Some(text_renderer),
@@ -105,9 +111,21 @@ pub mod widget_common {
             self.insert_char('\t')
         }
 
+        fn adjust_viewport(&mut self) {
+            let (row, _) = self.cursor;
+            let height = self.height.load(Ordering::Relaxed) as usize;
+
+            if row < self.top_row {
+                self.top_row = row;
+            } else if row >= self.top_row + height {
+                unimplemented!()
+            }
+        }
+
         pub fn move_cursor(&mut self, direction: CursorMoveDirection) {
             if let Some(cursor) = direction.next_cursor(self.cursor, &self.lines) {
                 self.cursor = cursor;
+                self.adjust_viewport();
             }
         }
 
@@ -146,11 +164,13 @@ pub mod widget_common {
         }
 
         pub fn wrap_editor_lines_no_color(&self, area: Rect) -> Vec<Line<'_>> {
-            let width = area.width as usize;
+            let (height, width) = (area.height as usize, area.width as usize);
             let (row, col) = self.cursor;
 
             self.lines
                 .iter()
+                .skip(self.top_row)
+                .take(height)
                 .enumerate()
                 .map(|(i, l)| match (i == row, l.chars().count() < width) {
                     (false, true) => {
@@ -269,14 +289,14 @@ pub mod widget_common {
     }
 
     fn separate_cursor_slice_and_append<'editor_token>(
-        token: &str,
         at_and_after_cursor: &'editor_token str,
         mut remaining_space: usize,
+        mut overflow_lines: usize,
         width: usize,
         color: Color,
         lines: &mut Vec<Line<'editor_token>>,
         line_spans: &mut Vec<Span<'editor_token>>,
-    ) -> usize {
+    ) -> (usize, usize) {
         use std::mem::take;
         match separate_cursor_slice(at_and_after_cursor) {
             Some((cursor_str, rest)) => {
@@ -289,33 +309,35 @@ pub mod widget_common {
                     remaining_space -= 1;
                 }
 
-                remaining_space = fit_text_and_append_to_lines(
+                (remaining_space, overflow_lines) = fit_text_and_append_to_lines(
                     rest,
                     remaining_space,
+                    overflow_lines,
                     color,
                     width,
                     line_spans,
                     lines,
                 );
 
-                remaining_space
+                (remaining_space, overflow_lines)
             }
-            None => remaining_space,
+            None => (remaining_space, overflow_lines),
         }
     }
 
     fn fit_text_and_append_to_lines<'editor_token>(
         text: &'editor_token str,
         remaining_space: usize,
+        overflow_lines: usize,
         color: Color,
         width: usize,
         line_spans: &mut Vec<Span<'editor_token>>,
         lines: &mut Vec<Line<'editor_token>>,
-    ) -> usize {
+    ) -> (usize, usize) {
         let token_fit_res =
             fit_token_in_remaining_space_no_cursor(text, remaining_space, color, width);
 
-        extend_lines_and_line_spans_no_cursor(token_fit_res, line_spans, lines)
+        extend_lines_and_line_spans(token_fit_res, overflow_lines, line_spans, lines)
     }
 
     fn fit_token_in_remaining_space_no_cursor(
@@ -345,20 +367,22 @@ pub mod widget_common {
         }
     }
 
-    fn extend_lines_and_line_spans_no_cursor<'editor_token>(
+    fn extend_lines_and_line_spans<'editor_token>(
         token_fit_res: TokenWrap<'editor_token>,
+        overflow_line_count: usize,
         line_spans: &mut Vec<Span<'editor_token>>,
         lines: &mut Vec<Line<'editor_token>>,
-    ) -> usize {
+    ) -> (usize, usize) {
         use std::mem::take;
         match token_fit_res {
             TokenWrap::NoOverflow((line_span, space_left)) => {
                 line_spans.extend(line_span);
-                space_left
+                (space_left, overflow_line_count)
             }
             TokenWrap::Overflow((line_span, mut overflow_lines, space_left)) => {
                 line_spans.extend(line_span);
                 lines.push(Line::from(take(line_spans)));
+                let token_overflowed_lines_len = overflow_lines.len();
 
                 if let Some(tail) = overflow_lines.pop() {
                     for line in overflow_lines {
@@ -368,7 +392,7 @@ pub mod widget_common {
                     line_spans.extend(tail);
                 }
 
-                space_left
+                (space_left, overflow_line_count + token_overflowed_lines_len)
             }
         }
     }
@@ -381,47 +405,57 @@ pub mod widget_common {
         width: usize,
         mut remaining_space: usize,
         mut render_col_offset: usize,
+        mut overflow_lines: usize,
         line_spans: &mut Vec<Span<'editor_token>>,
         lines: &mut Vec<Line<'editor_token>>,
-    ) -> (usize, usize) {
+    ) -> (usize, usize, usize) {
         let text_len = text.len();
         if row == row_idx && col >= render_col_offset && render_col_offset + text_len > col {
             let cursor_col_relative = col - render_col_offset;
             let (before_cursor, at_and_after_cursor) = text.split_at(cursor_col_relative);
 
-            remaining_space = fit_text_and_append_to_lines(
+            (remaining_space, overflow_lines) = fit_text_and_append_to_lines(
                 before_cursor,
                 remaining_space,
+                overflow_lines,
                 color,
                 width,
                 line_spans,
                 lines,
             );
 
-            remaining_space = separate_cursor_slice_and_append(
-                text,
+            (remaining_space, overflow_lines) = separate_cursor_slice_and_append(
                 at_and_after_cursor,
                 remaining_space,
+                overflow_lines,
                 width,
                 color,
                 lines,
                 line_spans,
             )
         } else {
-            remaining_space =
-                fit_text_and_append_to_lines(text, remaining_space, color, width, line_spans, lines)
+            (remaining_space, overflow_lines) = fit_text_and_append_to_lines(
+                text,
+                remaining_space,
+                overflow_lines,
+                color,
+                width,
+                line_spans,
+                lines,
+            )
         }
-
         render_col_offset += text_len;
-        (remaining_space, render_col_offset)
+        (remaining_space, render_col_offset, overflow_lines)
     }
 
     impl From<Vec<String>> for EditorInner {
         fn from(value: Vec<String>) -> Self {
             Self {
+                top_row: 1,
                 text_renderer: None,
                 lines: value,
-                cursor: (0, 0),
+                cursor: (1, 0),
+                height: AtomicU16::new(0),
             }
         }
     }
@@ -963,16 +997,23 @@ impl<'editor> Editor<'editor> {
         lines: &'a Vec<String>,
         area: Rect,
         (row, col): (usize, usize),
+        top_row: usize,
     ) -> Vec<Line<'a>> {
         use std::mem::take;
         let colorscheme = get_default_editor_colorscheme();
         let tokenized_lines = parse_curlman_editor(lines);
 
         let width = area.width as usize;
+        let height = area.height as usize;
+        let mut overflow_lines = 0;
         let mut lines = vec![];
         let mut line_spans = vec![];
 
         for (idx, line) in tokenized_lines.into_iter().enumerate() {
+            if idx < top_row || idx >= top_row + height + overflow_lines {
+                continue;
+            }
+
             let mut remaining_space = area.width as usize;
             let mut render_col_offset = 0;
             for token in line {
@@ -985,17 +1026,19 @@ impl<'editor> Editor<'editor> {
                     | CurlmanToken::Separator(text)
                     | CurlmanToken::Unknown(text) => {
                         let color = token.get_color(&colorscheme);
-                        (remaining_space, render_col_offset) = fit_tokens_into_editor(
-                            text,
-                            (row, col),
-                            idx,
-                            color,
-                            width,
-                            remaining_space,
-                            render_col_offset,
-                            &mut line_spans,
-                            &mut lines,
-                        );
+                        (remaining_space, render_col_offset, overflow_lines) =
+                            fit_tokens_into_editor(
+                                text,
+                                (row, col),
+                                idx,
+                                color,
+                                width,
+                                remaining_space,
+                                render_col_offset,
+                                overflow_lines,
+                                &mut line_spans,
+                                &mut lines,
+                            );
                     }
                 }
             }

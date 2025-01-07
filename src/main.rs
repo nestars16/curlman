@@ -55,7 +55,7 @@ impl Drop for App {
 }
 
 //TODO
-//FIXME FIX EDITOR ERRORING OUT ON BYTE SLICING
+//FIX ADJUSTING VIEWPORT
 //Add yanking and visual mode to vim and complete deletes
 //Add jq json filtering
 //curl file uploads, basic auth and auth redirect

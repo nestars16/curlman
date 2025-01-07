@@ -451,15 +451,22 @@ impl JsonFormatter {
         lines: &'a Vec<String>,
         area: Rect,
         (row, col): (usize, usize),
+        top_row: usize,
     ) -> Vec<Line<'a>> {
         use std::mem::take;
         let colorscheme = get_default_output_colorscheme();
         let tokenized_lines = parse_request_json(lines);
         let width = area.width as usize;
+        let height = area.height as usize;
         let mut lines = vec![];
         let mut line_spans = vec![];
+        let mut overflow_lines = 0;
 
         for (idx, line) in tokenized_lines.into_iter().enumerate() {
+            if idx < top_row || idx + overflow_lines >= height + top_row {
+                continue;
+            }
+
             let mut remaining_space = area.width as usize;
             let mut render_col_offset = 0;
             for token in line {
@@ -475,21 +482,22 @@ impl JsonFormatter {
                     | JsonToken::Invalid(text) => {
                         let color = token.get_color(&colorscheme);
 
-                        (remaining_space, render_col_offset) = fit_tokens_into_editor(
-                            text,
-                            (row, col),
-                            idx,
-                            color,
-                            width,
-                            remaining_space,
-                            render_col_offset,
-                            &mut line_spans,
-                            &mut lines,
-                        );
+                        (remaining_space, render_col_offset, overflow_lines) =
+                            fit_tokens_into_editor(
+                                text,
+                                (row, col),
+                                idx,
+                                color,
+                                width,
+                                remaining_space,
+                                render_col_offset,
+                                overflow_lines,
+                                &mut line_spans,
+                                &mut lines,
+                            );
                     }
                 }
             }
-
             if idx == row && col == render_col_offset {
                 line_spans.push(Span::raw(" ").reversed());
             }
@@ -499,7 +507,7 @@ impl JsonFormatter {
             }
         }
 
-        lines
+        dbg!(lines)
     }
 }
 
