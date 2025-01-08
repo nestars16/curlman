@@ -452,7 +452,7 @@ impl JsonFormatter {
         area: Rect,
         (row, col): (usize, usize),
         top_row: usize,
-    ) -> Vec<Line<'a>> {
+    ) -> (Vec<Line<'a>>, usize) {
         use std::mem::take;
         let colorscheme = get_default_output_colorscheme();
         let tokenized_lines = parse_request_json(lines);
@@ -507,7 +507,7 @@ impl JsonFormatter {
             }
         }
 
-        dbg!(lines)
+        (lines, overflow_lines)
     }
 }
 

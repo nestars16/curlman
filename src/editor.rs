@@ -36,7 +36,9 @@ pub mod widget_common {
         pub cursor: (usize, usize),
         pub top_row: usize,
         pub height: AtomicU16,
-        pub text_renderer: Option<fn(&Vec<String>, Rect, (usize, usize), usize) -> Vec<Line<'_>>>,
+        pub overflow_lines: AtomicU16,
+        pub text_renderer:
+            Option<fn(&Vec<String>, Rect, (usize, usize), usize) -> (Vec<Line<'_>>, usize)>,
     }
 
     impl WidgetRef for EditorInner {
@@ -44,11 +46,16 @@ pub mod widget_common {
         #[doc = " to implement a custom widget."]
         fn render_ref(&self, area: Rect, buf: &mut Buffer) {
             self.height.store(area.height, Ordering::Relaxed);
-            Text::from(match self.text_renderer {
+
+            let (lines, overflow_line_count) = match self.text_renderer {
                 Some(tokenizer) => tokenizer(&self.lines, area, self.cursor, self.top_row),
-                None => self.wrap_editor_lines_no_color(area),
-            })
-            .render(area, buf)
+                None => (self.wrap_editor_lines_no_color(area), 0),
+            };
+
+            self.overflow_lines
+                .store(overflow_line_count as u16, Ordering::Relaxed);
+
+            Text::from(lines).render(area, buf)
         }
     }
 
@@ -60,12 +67,13 @@ pub mod widget_common {
                 cursor: (0, 0),
                 top_row: 0,
                 height: AtomicU16::new(0),
+                overflow_lines: AtomicU16::new(0),
             }
         }
 
         pub fn with_renderer(
             self,
-            text_renderer: fn(&Vec<String>, Rect, (usize, usize), usize) -> Vec<Line<'_>>,
+            text_renderer: fn(&Vec<String>, Rect, (usize, usize), usize) -> (Vec<Line<'_>>, usize),
         ) -> Self {
             Self {
                 text_renderer: Some(text_renderer),
@@ -105,6 +113,7 @@ pub mod widget_common {
 
             self.lines.insert(row + 1, next_line);
             self.cursor = (row + 1, 0);
+            self.adjust_viewport();
         }
 
         pub fn insert_tab(&mut self) {
@@ -114,11 +123,12 @@ pub mod widget_common {
         fn adjust_viewport(&mut self) {
             let (row, _) = self.cursor;
             let height = self.height.load(Ordering::Relaxed) as usize;
+            let overflow_line_count = self.overflow_lines.load(Ordering::Relaxed) as usize;
 
             if row < self.top_row {
                 self.top_row = row;
-            } else if row >= self.top_row + height {
-                unimplemented!()
+            } else if row + overflow_line_count >= self.top_row + height {
+                self.top_row = (row + overflow_line_count).saturating_sub(height - 1);
             }
         }
 
@@ -140,6 +150,8 @@ pub mod widget_common {
 
             self.cursor = (row - 1, prev_line.chars().count());
             prev_line.push_str(&line);
+
+            self.adjust_viewport();
         }
 
         pub fn delete_char(&mut self) {
@@ -451,10 +463,11 @@ pub mod widget_common {
     impl From<Vec<String>> for EditorInner {
         fn from(value: Vec<String>) -> Self {
             Self {
-                top_row: 1,
+                overflow_lines: AtomicU16::new(0),
+                top_row: 0,
                 text_renderer: None,
                 lines: value,
-                cursor: (1, 0),
+                cursor: (0, 0),
                 height: AtomicU16::new(0),
             }
         }
@@ -998,7 +1011,7 @@ impl<'editor> Editor<'editor> {
         area: Rect,
         (row, col): (usize, usize),
         top_row: usize,
-    ) -> Vec<Line<'a>> {
+    ) -> (Vec<Line<'a>>, usize) {
         use std::mem::take;
         let colorscheme = get_default_editor_colorscheme();
         let tokenized_lines = parse_curlman_editor(lines);
@@ -1010,7 +1023,7 @@ impl<'editor> Editor<'editor> {
         let mut line_spans = vec![];
 
         for (idx, line) in tokenized_lines.into_iter().enumerate() {
-            if idx < top_row || idx >= top_row + height + overflow_lines {
+            if idx < top_row || idx + overflow_lines >= top_row + height {
                 continue;
             }
 
@@ -1052,7 +1065,7 @@ impl<'editor> Editor<'editor> {
             }
         }
 
-        lines
+        (lines, overflow_lines)
     }
 }
 impl<'editor> StatefulWidgetRef for Editor<'editor> {
