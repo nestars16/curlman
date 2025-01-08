@@ -118,16 +118,13 @@ impl CursorMoveDirection {
                 Some((row, fit_col(col, &lines[row])))
             }
             WordForward => {
-                let rest_of_line = &lines[row][col..];
-                Some((row, find_word_forward_pos(rest_of_line)?))
+                unimplemented!()
             }
             WordEnd => {
-                let rest_of_line = &lines[row][col..];
-                Some((row, find_word_end_pos(rest_of_line)?))
+                unimplemented!()
             }
             WordBack => {
-                let rest_of_line = &lines[row][..col];
-                Some((row, find_word_backward_pos(rest_of_line)?))
+                unimplemented!()
             }
             Jump(row, col) => {
                 let row = cmp::min(*row as usize, lines.len() - 1);

@@ -49,7 +49,7 @@ pub mod widget_common {
 
             let (lines, overflow_line_count) = match self.text_renderer {
                 Some(tokenizer) => tokenizer(&self.lines, area, self.cursor, self.top_row),
-                None => (self.wrap_editor_lines_no_color(area), 0),
+                None => self.wrap_editor_lines_no_color(area),
             };
 
             self.overflow_lines
@@ -175,101 +175,44 @@ pub mod widget_common {
             &self.lines
         }
 
-        pub fn wrap_editor_lines_no_color(&self, area: Rect) -> Vec<Line<'_>> {
+        pub fn wrap_editor_lines_no_color(&self, area: Rect) -> (Vec<Line<'_>>, usize) {
+            use std::mem::take;
             let (height, width) = (area.height as usize, area.width as usize);
             let (row, col) = self.cursor;
+            let mut overflow_lines = 0;
+            let mut lines = vec![];
+            let mut line_spans = vec![];
 
-            self.lines
-                .iter()
-                .skip(self.top_row)
-                .take(height)
-                .enumerate()
-                .map(|(i, l)| match (i == row, l.chars().count() < width) {
-                    (false, true) => {
-                        vec![Line::from(l.as_str())]
-                    }
-                    (false, false) => Self::split_line_into_multline(width, l, false, col),
-                    (true, true) => {
-                        vec![Self::split_into_single_line_cursor(l, col)]
-                    }
-                    (true, false) => Self::split_line_into_multline(width, l, true, col),
-                })
-                .flatten()
-                .collect::<Vec<_>>()
-        }
-
-        fn split_into_single_line_cursor(line: &str, col: usize) -> Line<'_> {
-            let (before_cursor, at_and_after_cursor) = line.split_at(col);
-            let (cursor_str, after_cursor) = match at_and_after_cursor.char_indices().take(1).last()
-            {
-                Some((idx, c)) => {
-                    let grapheme_end_idx = idx + c.len_utf8();
-                    (
-                        &at_and_after_cursor[idx..grapheme_end_idx],
-                        &at_and_after_cursor[grapheme_end_idx..],
-                    )
+            for (idx, line) in self.lines.iter().enumerate() {
+                if idx < self.top_row || idx + overflow_lines >= self.top_row + height {
+                    continue;
                 }
-                None => (" ", ""),
-            };
 
-            if after_cursor.is_empty() {
-                Line::from(vec![
-                    Span::raw(before_cursor),
-                    Span::raw(cursor_str).reversed(),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw(before_cursor),
-                    Span::raw(cursor_str).reversed(),
-                    Span::raw(after_cursor),
-                ])
-            }
-        }
+                let mut render_col_offset = 0;
 
-        fn split_line_into_multline(
-            width: usize,
-            line: &str,
-            has_to_draw_cursor: bool,
-            col: usize,
-        ) -> Vec<Line<'_>> {
-            let mut line_segments = vec![];
-            let mut current_chunk_start = 0;
-            let mut current_char_offset = 0;
+                (_, render_col_offset, overflow_lines) = fit_tokens_into_editor(
+                    line,
+                    (row, col),
+                    idx,
+                    Color::White,
+                    width,
+                    width,
+                    render_col_offset,
+                    overflow_lines,
+                    &mut line_spans,
+                    &mut lines,
+                );
 
-            loop {
-                let current_chunk_chars = line.char_indices().skip(current_char_offset).take(width);
+                if idx == row && col == render_col_offset {
+                    line_spans.push(Span::raw(" ").reversed());
+                }
 
-                match current_chunk_chars.last() {
-                    Some((idx, c)) => {
-                        let chunk_end_idx = idx + c.len_utf8();
-                        let curr_line = &line[current_chunk_start..chunk_end_idx];
-
-                        match has_to_draw_cursor
-                            && current_chunk_start <= col
-                            && col <= chunk_end_idx
-                        {
-                            true => {
-                                let relative_col = col - current_chunk_start;
-
-                                line_segments.push(Self::split_into_single_line_cursor(
-                                    curr_line,
-                                    relative_col,
-                                ));
-                            }
-                            false => {
-                                line_segments.push(Line::from(curr_line));
-                            }
-                        }
-                        current_chunk_start = chunk_end_idx;
-                        current_char_offset += width;
-                    }
-                    None => {
-                        break;
-                    }
+                if !line_spans.is_empty() {
+                    lines.push(Line::from(take(&mut line_spans)));
                 }
             }
 
-            line_segments
+            (lines, overflow_lines)
         }
     }
 
@@ -346,13 +289,11 @@ pub mod widget_common {
         line_spans: &mut Vec<Span<'editor_token>>,
         lines: &mut Vec<Line<'editor_token>>,
     ) -> (usize, usize) {
-        let token_fit_res =
-            fit_token_in_remaining_space_no_cursor(text, remaining_space, color, width);
-
+        let token_fit_res = fit_token_in_remaining_space(text, remaining_space, color, width);
         extend_lines_and_line_spans(token_fit_res, overflow_lines, line_spans, lines)
     }
 
-    fn fit_token_in_remaining_space_no_cursor(
+    fn fit_token_in_remaining_space(
         text: &str,
         remaining_space: usize,
         color: Color,
@@ -456,6 +397,7 @@ pub mod widget_common {
                 lines,
             )
         }
+
         render_col_offset += text_len;
         (remaining_space, render_col_offset, overflow_lines)
     }
@@ -612,6 +554,11 @@ impl TryFrom<char> for CursorMovement {
             '0' => Ok(Self::Regular(CursorMoveDirection::Head)),
             'h' => Ok(Self::Regular(CursorMoveDirection::Back)),
             'l' => Ok(Self::Regular(CursorMoveDirection::Forward)),
+            'g' => Ok(Self::Regular(CursorMoveDirection::Top)),
+            'G' => Ok(Self::Regular(CursorMoveDirection::Bottom)),
+            'w' => Ok(Self::Regular(CursorMoveDirection::WordEnd)),
+            'W' => Ok(Self::Regular(CursorMoveDirection::WordForward)),
+            'b' => Ok(Self::Regular(CursorMoveDirection::WordBack)),
             _ => Err(()),
         }
     }
@@ -646,6 +593,15 @@ impl TryFrom<char> for VimMotion {
             ))),
             'x' => Ok(Self::Delete(CursorMovement::Regular(
                 CursorMoveDirection::Back,
+            ))),
+            'w' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::WordEnd,
+            ))),
+            'W' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::WordForward,
+            ))),
+            'b' => Ok(Self::Move(CursorMovement::Regular(
+                CursorMoveDirection::WordBack,
             ))),
             _ => Err(()),
         }

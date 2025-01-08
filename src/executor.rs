@@ -371,7 +371,17 @@ impl<'widget> InputListener for RequestExecutor {
                             self.header_paragraph_scroll += 1;
                         }
 
-                        keys::UP | keys::DOWN | keys::LEFT | keys::RIGHT
+                        keys::UP
+                        | keys::DOWN
+                        | keys::LEFT
+                        | keys::RIGHT
+                        | '$'
+                        | '0'
+                        | 'g'
+                        | 'G'
+                        | 'w'
+                        | 'W'
+                        | 'b'
                             if matches!(self.view, RequestExecutorView::RequestBody) =>
                         {
                             self.move_cursor(
