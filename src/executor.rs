@@ -160,6 +160,7 @@ impl RequestExecutor {
                     match String::from_utf8_lossy(into).split_once(':') {
                         Some((header_name, header_value)) => 'some_block: {
                             let header_name_parse_res = header_name.parse::<HeaderName>();
+
                             let Ok(header_name) = header_name_parse_res else {
                                 break 'some_block;
                             };
@@ -182,6 +183,7 @@ impl RequestExecutor {
                         Err(_) => Err(ReadError::Abort),
                     }
                 })?;
+
                 transfer.write_function(|data| {
                     self.output_data.extend_from_slice(data);
                     Ok(data.len())

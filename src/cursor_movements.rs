@@ -118,13 +118,54 @@ impl CursorMoveDirection {
                 Some((row, fit_col(col, &lines[row])))
             }
             WordForward => {
-                unimplemented!()
+                let line = &lines[row];
+                let offset = &line[..col].len();
+                let line_chunk = &line[col..];
+                let mut has_seen_white_space = false;
+                for (idx, c) in line_chunk.char_indices() {
+                    if c.is_ascii_whitespace() {
+                        has_seen_white_space = true;
+                    } else if has_seen_white_space || idx == line.len() {
+                        return Some((row, offset + idx));
+                    }
+                }
+
+                None
             }
             WordEnd => {
-                unimplemented!()
+                let line = &lines[row];
+                let offset = &line[..col].len();
+                let line_chunk = &line[col..];
+                let mut prev: Option<(usize, char)> = None;
+
+                for (idx, c) in line_chunk.char_indices() {
+                    if c.is_ascii_whitespace() {
+                        match prev {
+                            Some((prev_idx, prev_c)) if !prev_c.is_ascii_whitespace() => {
+                                return Some((row, prev_idx + offset))
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    prev = Some((idx, c));
+                }
+
+                None
             }
             WordBack => {
-                unimplemented!()
+                let line_chunk = &lines[row][..col];
+                let mut has_seen_whitespace = false;
+                for (idx, c) in line_chunk.char_indices().rev() {
+                    if c.is_ascii_whitespace() {
+                        has_seen_whitespace = true;
+                        continue;
+                    } else if has_seen_whitespace || idx == 0 {
+                        return Some((row, idx));
+                    }
+                }
+
+                None
             }
             Jump(row, col) => {
                 let row = cmp::min(*row as usize, lines.len() - 1);

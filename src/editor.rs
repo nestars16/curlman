@@ -116,8 +116,36 @@ pub mod widget_common {
             self.adjust_viewport();
         }
 
+        fn spaces(size: u8) -> &'static str {
+            const SPACES: &str = "                                                                                                                                                                                                                                                                ";
+            &SPACES[..size as usize]
+        }
+
         pub fn insert_tab(&mut self) {
-            self.insert_char('\t')
+            const TAB_LEN: usize = 2;
+            let (row, col) = self.cursor;
+
+            let width: usize = self.lines[row]
+                .chars()
+                .take(col)
+                .map(|c| c.len_utf8())
+                .sum();
+
+            let len = TAB_LEN - (width % TAB_LEN);
+            self.insert_piece(Self::spaces(len as u8).to_string())
+        }
+
+        fn insert_piece(&mut self, s: String) {
+            let (row, col) = self.cursor;
+            let line = &mut self.lines[row];
+            let i = line
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            line.insert_str(i, &s);
+
+            self.cursor.1 += s.chars().count();
         }
 
         fn adjust_viewport(&mut self) {
