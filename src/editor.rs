@@ -584,8 +584,8 @@ impl TryFrom<char> for CursorMovement {
             'l' => Ok(Self::Regular(CursorMoveDirection::Forward)),
             'g' => Ok(Self::Regular(CursorMoveDirection::Top)),
             'G' => Ok(Self::Regular(CursorMoveDirection::Bottom)),
-            'w' => Ok(Self::Regular(CursorMoveDirection::WordEnd)),
-            'W' => Ok(Self::Regular(CursorMoveDirection::WordForward)),
+            'e' => Ok(Self::Regular(CursorMoveDirection::WordEnd)),
+            'w' => Ok(Self::Regular(CursorMoveDirection::WordForward)),
             'b' => Ok(Self::Regular(CursorMoveDirection::WordBack)),
             _ => Err(()),
         }
@@ -622,10 +622,10 @@ impl TryFrom<char> for VimMotion {
             'x' => Ok(Self::Delete(CursorMovement::Regular(
                 CursorMoveDirection::Back,
             ))),
-            'w' => Ok(Self::Move(CursorMovement::Regular(
+            'e' => Ok(Self::Move(CursorMovement::Regular(
                 CursorMoveDirection::WordEnd,
             ))),
-            'W' => Ok(Self::Move(CursorMovement::Regular(
+            'w' => Ok(Self::Move(CursorMovement::Regular(
                 CursorMoveDirection::WordForward,
             ))),
             'b' => Ok(Self::Move(CursorMovement::Regular(

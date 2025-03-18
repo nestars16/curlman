@@ -16,42 +16,6 @@ pub enum CursorMoveDirection {
     Jump(u16, u16),
 }
 
-fn find_word_forward_pos(line: &str) -> Option<usize> {
-    let mut in_whitespace = line.chars().next()?.is_whitespace();
-    for (idx, ch) in line.char_indices() {
-        if in_whitespace && !ch.is_whitespace() {
-            return Some(idx);
-        }
-        in_whitespace = ch.is_whitespace();
-    }
-    None
-}
-
-fn find_word_backward_pos(line: &str) -> Option<usize> {
-    let mut in_whitespace = line.chars().last()?.is_whitespace();
-    for (idx, ch) in line.char_indices().rev() {
-        if !in_whitespace && ch.is_whitespace() {
-            return Some(idx + 1); // +1 to point to the start of the word
-        }
-        in_whitespace = ch.is_whitespace();
-    }
-    None
-}
-
-fn find_word_end_pos(line: &str) -> Option<usize> {
-    for (idx, ch) in line.char_indices() {
-        if ch.is_ascii_punctuation()
-            || line[idx..]
-                .chars()
-                .nth(1)
-                .map_or(true, |next_ch| next_ch.is_whitespace())
-        {
-            return Some(idx);
-        }
-    }
-    None
-}
-
 impl CursorMoveDirection {
     pub fn next_cursor(
         &self,
@@ -119,52 +83,65 @@ impl CursorMoveDirection {
             }
             WordForward => {
                 let line = &lines[row];
-                let offset = &line[..col].len();
-                let line_chunk = &line[col..];
-                let mut has_seen_white_space = false;
-                for (idx, c) in line_chunk.char_indices() {
-                    if c.is_ascii_whitespace() {
-                        has_seen_white_space = true;
-                    } else if has_seen_white_space || idx == line.len() {
-                        return Some((row, offset + idx));
+                let other_half_of_line = &line[..col];
+                let rest_of_line = &line[col..];
+                let mut has_seen_punctuation = false;
+                let mut has_seen_whitespace = false;
+
+                let is_first_punctuation = rest_of_line
+                    .chars()
+                    .into_iter()
+                    .nth(0)
+                    .is_none_or(|s| s.is_ascii_punctuation());
+
+                for (idx, ch) in rest_of_line.char_indices() {
+                    let is_stopper = ch.is_whitespace() || ch.is_ascii_punctuation();
+
+                    if ch.is_whitespace() {
+                        has_seen_whitespace = true;
+                        continue;
+                    }
+
+                    if ch.is_ascii_punctuation() {
+                        has_seen_punctuation = true;
+                    }
+
+                    match (has_seen_whitespace, has_seen_punctuation) {
+                        (true, true) | (true, false) => {
+                            if !is_stopper {
+                                return Some((row, idx + other_half_of_line.len()));
+                            }
+                        }
+                        (false, true) => {
+                            if !is_first_punctuation {
+                                return Some((row, idx + other_half_of_line.len()));
+                            } else if !is_stopper {
+                                return Some((row, idx + other_half_of_line.len()));
+                            }
+                        }
+                        (false, false) => continue,
                     }
                 }
 
-                None
+                match lines.get(row + 1) {
+                    Some(next_line) => Some((
+                        row + 1,
+                        next_line
+                            .char_indices()
+                            .into_iter()
+                            .find(|(_, ch)| !ch.is_whitespace())
+                            .unwrap_or((0, ' '))
+                            .0,
+                    )),
+                    None => Some((row, line.char_indices().last().unwrap_or((0, ' ')).0)),
+                }
             }
             WordEnd => {
-                let line = &lines[row];
-                let offset = &line[..col].len();
-                let line_chunk = &line[col..];
-                let mut prev: Option<(usize, char)> = None;
-
-                for (idx, c) in line_chunk.char_indices() {
-                    if c.is_ascii_whitespace() {
-                        match prev {
-                            Some((prev_idx, prev_c)) if !prev_c.is_ascii_whitespace() => {
-                                return Some((row, prev_idx + offset))
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    prev = Some((idx, c));
-                }
-
+                let rest_of_line = &lines[row][col..];
                 None
             }
             WordBack => {
-                let line_chunk = &lines[row][..col];
-                let mut has_seen_whitespace = false;
-                for (idx, c) in line_chunk.char_indices().rev() {
-                    if c.is_ascii_whitespace() {
-                        has_seen_whitespace = true;
-                        continue;
-                    } else if has_seen_whitespace || idx == 0 {
-                        return Some((row, idx));
-                    }
-                }
-
+                let s = 0;
                 None
             }
             Jump(row, col) => {
