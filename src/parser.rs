@@ -43,6 +43,7 @@ pub enum CurlmanToken<'a> {
     ParamKey(&'a str),
     ParamValue(&'a str),
     Whitespace(&'a str),
+    EnvVariable(&'a str),
     Separator(&'a str),
     Unknown(&'a str),
 }
@@ -57,6 +58,7 @@ impl<'a> CurlmanToken<'a> {
             CurlmanToken::Whitespace(text) => text,
             CurlmanToken::Separator(text) => text,
             CurlmanToken::Unknown(text) => text,
+            CurlmanToken::EnvVariable(text) => text,
         }
     }
 
@@ -69,11 +71,12 @@ impl<'a> CurlmanToken<'a> {
             CurlmanToken::Separator(_) => colorscheme.separator_color,
             CurlmanToken::Unknown(_) => colorscheme.unknown_color,
             CurlmanToken::Whitespace(_) => Color::White,
+            CurlmanToken::EnvVariable(_) => Color::White,
         }
     }
 }
 
-fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, VerboseError<&str>> {
+fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, VerboseError<&'a str>> {
     let string_parser = alt((
         delimited(char('"'), take_till(|ch: char| ch == '"'), char('"')),
         delimited(char('\''), take_till(|ch: char| ch == '\''), char('\'')),

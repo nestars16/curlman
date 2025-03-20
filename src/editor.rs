@@ -1021,7 +1021,8 @@ impl<'editor> Editor<'editor> {
                     | CurlmanToken::ParamValue(text)
                     | CurlmanToken::Whitespace(text)
                     | CurlmanToken::Separator(text)
-                    | CurlmanToken::Unknown(text) => {
+                    | CurlmanToken::Unknown(text)
+                    | CurlmanToken::EnvVariable(text) => {
                         let color = token.get_color(&colorscheme);
                         (remaining_space, render_col_offset, overflow_lines) =
                             fit_tokens_into_editor(

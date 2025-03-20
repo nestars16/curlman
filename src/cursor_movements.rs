@@ -137,12 +137,68 @@ impl CursorMoveDirection {
                 }
             }
             WordEnd => {
-                let rest_of_line = &lines[row][col..];
-                None
+                let line = &lines[row][col..];
+                let behind_cursor = &lines[row][..col];
+                let mut prev: Option<(usize, char)> = None;
+
+                for (idx, ch) in line.char_indices() {
+                    if ch.is_whitespace() || ch.is_ascii_punctuation() && ch != '/' {
+                        if let Some((p_idx, p_ch)) = prev {
+                            if p_ch.is_whitespace() {
+                                continue;
+                            }
+
+                            if p_idx != 0 {
+                                return Some((row, p_idx + behind_cursor.len()));
+                            }
+                        }
+                    }
+                    prev = Some((idx, ch));
+                }
+
+                match lines.get(row + 1) {
+                    Some(next_line) => Some((
+                        row + 1,
+                        next_line
+                            .char_indices()
+                            .into_iter()
+                            .find(|(_, ch)| !ch.is_whitespace())
+                            .unwrap_or((0, ' '))
+                            .0,
+                    )),
+                    None => Some((row, line.char_indices().last().unwrap_or((0, ' ')).0)),
+                }
             }
             WordBack => {
-                let s = 0;
-                None
+                //curl https://google.com
+                let line = &lines[row];
+                let left_of_cursor = &line[..col];
+                let mut prev = None;
+
+                for (idx, ch) in left_of_cursor.char_indices().rev() {
+                    fn is_stopper(ch: char) -> bool {
+                        ch.is_whitespace() || ch.is_ascii_punctuation()
+                    }
+
+                    if is_stopper(ch) {
+                        match prev {
+                            Some((p_idx, p_ch)) if !is_stopper(p_ch) => {
+                                return Some((row, p_idx));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    prev = Some((idx, ch))
+                }
+
+                match lines.get(row - 1) {
+                    Some(_) => Some((
+                        row - 1,
+                        lines[row].char_indices().last().unwrap_or((0, ' ')).0,
+                    )),
+                    None => Some((row, lines[row].char_indices().nth(0).unwrap_or((0, ' ')).0)),
+                }
             }
             Jump(row, col) => {
                 let row = cmp::min(*row as usize, lines.len() - 1);
