@@ -92,7 +92,7 @@ pub struct RequestInfoFileMetadata {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestInfo {
     pub headers: HashMap<String, String>,
-    pub url: Option<Url>,
+    pub url: Option<String>,
     pub method: Method,
     pub timeout: Duration,
     pub body: Option<Vec<u8>>,
@@ -100,7 +100,7 @@ pub struct RequestInfo {
 }
 
 impl RequestInfo {
-    pub fn default_with_url(url: Url) -> Self {
+    pub fn default_with_url(url: String) -> Self {
         Self {
             url: Some(url),
             ..Default::default()

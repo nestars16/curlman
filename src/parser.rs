@@ -171,7 +171,7 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo, VerboseE
     };
 
     if input.is_empty() {
-        return Ok(("", RequestInfo::default_with_url(url)));
+        return Ok(("", RequestInfo::default_with_url(url_str.to_string())));
     }
 
     let (input, _) = multispace1(input)?;
@@ -179,7 +179,7 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo, VerboseE
     let (input, mut request_builder) = parse_curl_params(input)?;
     let (input, _) = multispace0(input)?;
 
-    request_builder.url = Some(url);
+    request_builder.url = Some(url_str.to_string());
     Ok((input, request_builder))
 }
 
@@ -670,7 +670,7 @@ mod tests {
             request,
             RequestInfo {
                 headers: HashMap::new(),
-                url: Some("http://example.com".parse::<Url>().unwrap()),
+                url: Some("http://example.com".to_string()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
                 body: None,
@@ -689,7 +689,7 @@ mod tests {
             RequestInfo {
                 flags: vec![],
                 headers: HashMap::new(),
-                url: Some("http://example.com".parse::<Url>().unwrap()),
+                url: Some("http://example.com".to_string()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
                 body: None
@@ -714,7 +714,7 @@ mod tests {
                     "Authorization".to_string(),
                     " Basic ${TOKEN}".to_string()
                 )]),
-                url: Some("http://example.com".parse::<Url>().unwrap()),
+                url: Some("http://example.com".to_string()),
                 method: http::Method::POST,
                 timeout: Duration::from_secs(30),
                 body: Some("{\"json_is_awesome\":true, \"count\": 0, \"test\": [1,2,3]}".into()),
@@ -758,7 +758,7 @@ mod tests {
                 RequestInfo {
                     flags: vec![],
                     headers: HashMap::new(),
-                    url: Some("http://example.com".parse::<Url>().unwrap()),
+                    url: Some("http://example.com".to_string()),
                     method: http::Method::GET,
                     timeout: Duration::from_secs(30),
                     body: None
@@ -769,7 +769,7 @@ mod tests {
                         "Authorization".to_string(),
                         " Bearer ${TOKEN}".to_string()
                     )]),
-                    url: Some("http://example.com".parse::<Url>().unwrap()),
+                    url: Some("http://example.com".to_string()),
                     method: http::Method::POST,
                     timeout: Duration::from_secs(30),
                     body: Some("{\"json_is\" : \"cool\", \"right\" : false}".into()),
@@ -790,7 +790,7 @@ mod tests {
             vec![RequestInfo {
                 headers: HashMap::new(),
                 flags: vec![],
-                url: Some("http://example.com".parse::<Url>().unwrap()),
+                url: Some("http://example.com".to_string()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
                 body: None
@@ -811,7 +811,7 @@ mod tests {
             requests,
             vec![RequestInfo {
                 headers: HashMap::new(),
-                url: Some("http://example.com".parse::<Url>().unwrap()),
+                url: Some("http://example.com".to_string()),
                 method: http::Method::GET,
                 timeout: Duration::from_secs(30),
                 body: None,

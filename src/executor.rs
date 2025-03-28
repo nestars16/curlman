@@ -5,6 +5,7 @@ use ratatui::{
 };
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     ffi::{CStr, CString},
     fmt::Write,
@@ -51,6 +52,10 @@ enum RequestExecutorView {
     Headers,
 }
 
+pub struct Enviroment {
+    vars: HashMap<String, String>,
+}
+
 pub struct RequestExecutor {
     header_paragraph_scroll: u16,
     block: Block<'static>,
@@ -63,6 +68,7 @@ pub struct RequestExecutor {
     headers: HashMap<HeaderName, String>,
     request: Option<RequestInfo>,
     view: RequestExecutorView,
+    env: Enviroment,
 }
 
 impl RequestExecutor {
@@ -79,7 +85,58 @@ impl RequestExecutor {
             editor: EditorInner::new(),
             body_cursor: None,
             error: None,
+            env: Enviroment {
+                vars: HashMap::new(),
+            },
         }
+    }
+
+    pub fn populate_request_url<'a>(
+        &self,
+        template_string: &'a str,
+    ) -> Result<Cow<'a, str>, Error> {
+        enum ParserState {
+            Looking,
+            Open,
+        }
+
+        let mut state = ParserState::Looking;
+        let mut populated_string = String::new();
+        let mut template_var_start = 0;
+        let mut non_template_slice_start = 0;
+
+        for (idx, ch) in template_string.char_indices() {
+            match state {
+                ParserState::Looking if ch == '{' => {
+                    let to_consume = &template_string[non_template_slice_start..idx];
+                    populated_string.push_str(to_consume);
+                    template_var_start = idx + 1;
+                    state = ParserState::Open;
+                }
+                ParserState::Open if ch == '}' => {
+                    non_template_slice_start = idx + 1;
+                    let desired_key = &template_string[template_var_start..idx];
+                    match self.env.vars.get(desired_key) {
+                        Some(val) => {
+                            populated_string.push_str(val);
+                        }
+                        None => return Err(Error::UnknownVar(desired_key.to_string())),
+                    }
+                    state = ParserState::Looking;
+                }
+                _ => {}
+            }
+        }
+
+        if populated_string.is_empty() {
+            Ok(Cow::Borrowed(template_string))
+        } else {
+            Ok(Cow::Owned(populated_string))
+        }
+    }
+
+    pub fn load_env(&mut self) -> Result<(), Error> {
+        Ok(())
     }
 
     pub fn perform_curl_request(&mut self) -> Result<(), Error> {
@@ -92,7 +149,7 @@ impl RequestExecutor {
         };
 
         self.headers.clear();
-        self.handle.url(url.as_str())?;
+        self.handle.url(&self.populate_request_url(url.as_str())?)?;
 
         let mut header_list = curl::easy::List::new();
         for (key, value) in req.headers {
@@ -257,9 +314,12 @@ impl RequestExecutor {
         match operator {
             CursorMovement::Until(char) => {
                 let current_line = &lines[row as usize][col as usize..];
+                let rest_of_current_line = &lines[row as usize][..col as usize];
                 if let Some(idx) = current_line.find(char) {
-                    self.editor
-                        .move_cursor(CursorMoveDirection::Jump(row as u16, idx as u16))
+                    self.editor.move_cursor(CursorMoveDirection::Jump(
+                        row as u16,
+                        (idx + rest_of_current_line.len()) as u16,
+                    ))
                 }
             }
             _ => {}
@@ -384,6 +444,7 @@ impl<'widget> InputListener for RequestExecutor {
                         | 'w'
                         | 'W'
                         | 'b'
+                        | 'e'
                             if matches!(self.view, RequestExecutorView::RequestBody) =>
                         {
                             self.move_cursor(
@@ -432,10 +493,10 @@ impl JsonFormatter {
 
         if jv_kind == jv_kind_JV_KIND_INVALID {
             if unsafe { jv_invalid_has_msg(jv_copy(input_jv)) == 1 } {
-                let error = unsafe { jv_invalid_get_msg(input_jv) };
-                let jv_c_string_val = unsafe { jv_string_value(error) };
-                let jv_error_string = unsafe { CStr::from_ptr(jv_c_string_val) }.to_string_lossy();
-                unsafe { jv_free(error) }
+                //let error = unsafe { jv_invalid_get_msg(input_jv) };
+                //let jv_c_string_val = unsafe { jv_string_value(error) };
+                //let jv_error_string = unsafe { CStr::from_ptr(jv_c_string_val) }.to_string_lossy();
+                //unsafe { jv_free(error) }
             } else {
                 unsafe { jv_free(input_jv) }
             }

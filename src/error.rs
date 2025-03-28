@@ -2,6 +2,7 @@
 pub enum Error {
     UnsupportedMethod(String),
     MissingUrl(&'static str),
+    UnknownVar(String),
     Curl(curl::Error),
     NoBody,
     Io(std::io::Error),
@@ -30,6 +31,9 @@ impl ToString for Error {
             }
             Error::InvalidState(reason) => {
                 format!("Error:\n{reason}")
+            }
+            Error::UnknownVar(var) => {
+                format!("Unset Variable:\n{var}")
             }
         }
     }

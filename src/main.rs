@@ -436,7 +436,9 @@ fn main() -> Result<(), crate::error::Error> {
     }
 
     let mut app = App::new(panes, layouts, 1, 0, curlman_file, initial_state, jq_state);
+
     app.run(&mut terminal)?;
+
     disable_raw_mode()?;
     Ok(())
 }
