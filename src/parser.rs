@@ -1,12 +1,9 @@
-use std::time::Duration;
-
-use http::Method;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, is_not, tag, take, take_till, take_while, take_while1},
     character::complete::{char, multispace0, multispace1, none_of, one_of},
     combinator::{map, map_res, recognize},
-    error::{Error, VerboseError, VerboseErrorKind},
+    error::{Error, VerboseError},
     multi::{many1, separated_list0},
     number::complete::recognize_float,
     sequence::{delimited, pair, separated_pair, tuple},
@@ -18,7 +15,7 @@ use url::Url;
 
 use crate::{
     editor::colors::{EditorColorscheme, JsonOutputColorscheme},
-    types::{BodyType, CurlFlag, CurlmanRequestParamType, RequestInfo},
+    types::{CurlFlag, CurlFlagType, RequestInfo},
 };
 
 fn string_parser_global(input: &str) -> IResult<&str, &str> {
@@ -33,6 +30,7 @@ fn string_parser_global(input: &str) -> IResult<&str, &str> {
         tag("\'"),
     ));
     let mut string_parser = recognize(alt((double_quoted, single_quoted)));
+
     string_parser(input)
 }
 
@@ -76,18 +74,21 @@ impl<'a> CurlmanToken<'a> {
     }
 }
 
-fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, VerboseError<&'a str>> {
+fn parse_curl_params<'a, 'b>(
+    input: &'a str,
+) -> IResult<&'a str, RequestInfo, VerboseError<&'a str>> {
     let string_parser = alt((
         delimited(char('"'), take_till(|ch: char| ch == '"'), char('"')),
         delimited(char('\''), take_till(|ch: char| ch == '\''), char('\'')),
     ));
 
-    let (input, _) = multispace0(input)?;
     let tag_parser = take_while(|ch: char| ch.is_ascii_alphanumeric());
+
     let param_parser = recognize(pair(
         take_while(|ch: char| ch == '-'),
         take_while(|ch: char| ch.is_ascii_alphanumeric()),
     ));
+
     let (input, params) = separated_list0(
         multispace1,
         separated_pair(param_parser, multispace1, alt((string_parser, tag_parser))),
@@ -96,60 +97,24 @@ fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, Verbos
     let mut request_info = RequestInfo::default();
 
     for (param_type, value) in params {
-        let param_type_res: Result<CurlmanRequestParamType, _> = param_type.parse();
+        let param_type_res: Result<CurlFlagType, _> = param_type.parse();
 
         match param_type_res {
             Ok(param_type) => match param_type {
-                CurlmanRequestParamType::Method => {
-                    let method_res: Result<Method, _> = value.parse();
-                    let Ok(method) = method_res else {
-                        return Err(nom::Err::Failure(VerboseError {
-                            errors: vec![(
-                                value,
-                                VerboseErrorKind::Context("Invalid Request Method"),
-                            )],
-                        }));
-                    };
-                    request_info.method = method
+                _ => {
+                    request_info.flags.push(CurlFlag::new(
+                        param_type,
+                        if value.trim().is_empty() {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        },
+                    ));
                 }
-                CurlmanRequestParamType::Header => {
-                    let (_, (key, value)) =
-                        separated_pair(take_till(|ch| ch == ':'), tag(":"), take_while(|_| true))(
-                            value,
-                        )?;
-
-                    request_info
-                        .headers
-                        .insert(key.to_string(), value.to_string());
-                }
-                CurlmanRequestParamType::Body(BodyType::Json) => {
-                    request_info.body = Some(value.as_bytes().into());
-                }
-                CurlmanRequestParamType::Timeout => {
-                    let (_, real_value) = decimal_integer(value).map_err(|_| {
-                        nom::Err::Failure(VerboseError {
-                            errors: vec![(
-                                value,
-                                VerboseErrorKind::Context("Invalid Request Timeout Len"),
-                            )],
-                        })
-                    })?;
-
-                    request_info.timeout = Duration::from_secs(real_value);
-                }
+                CurlFlagType::Method => todo!(),
+                CurlFlagType::Header => todo!(),
             },
-            Err(_) => {
-                let Ok(flag) = param_type.parse::<CurlFlag>() else {
-                    return Err(nom::Err::Failure(VerboseError {
-                        errors: vec![(
-                            param_type,
-                            VerboseErrorKind::Context("Invalid Parameter Type"),
-                        )],
-                    }));
-                };
-
-                request_info.flags.push(flag)
-            }
+            Err(_) => {}
         };
     }
 
@@ -160,6 +125,10 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo, VerboseE
     let (input, _) = multispace0(input)?;
     let (input, _) = tag("curl")(input)?;
     let (input, _) = multispace1(input)?;
+    let (input, request_info) = parse_curl_params(input)?;
+
+    Ok((input, request_info))
+    /*
     let (input, url_str) = take_till(char::is_whitespace)(input)?;
 
     let url_res: Result<Url, _> = url_str.parse();
@@ -181,6 +150,12 @@ pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo, VerboseE
 
     request_builder.url = Some(url_str.to_string());
     Ok((input, request_builder))
+    */
+}
+
+enum CurlmanParserState {
+    UrlFound,
+    LookingForUrl,
 }
 
 struct Request {
@@ -196,7 +171,7 @@ pub fn parse_curlman_request_file(
 }
 
 #[derive(Debug)]
-enum RequestParserState<'a> {
+enum EditorParserState<'a> {
     ExpectingCurl,
     ExpectingUrl,
     ExpectingParamKey,
@@ -206,11 +181,11 @@ enum RequestParserState<'a> {
 
 fn parse_curlman_editor_line<'a, 'b>(
     input: &'a str,
-    parser_state: &'b mut RequestParserState<'a>,
+    parser_state: &'b mut EditorParserState<'a>,
 ) -> IResult<&'a str, Vec<CurlmanToken<'a>>> {
     let mut line_tokens = Vec::new();
     match parser_state {
-        RequestParserState::ExpectingCurl => {
+        EditorParserState::ExpectingCurl => {
             let (input, space) = multispace0(input)?;
 
             if !space.is_empty() {
@@ -226,11 +201,11 @@ fn parse_curlman_editor_line<'a, 'b>(
                 line_tokens.push(CurlmanToken::Whitespace(space));
             }
 
-            *parser_state = RequestParserState::ExpectingUrl;
+            *parser_state = EditorParserState::ExpectingUrl;
             return Ok((input, line_tokens));
         }
 
-        RequestParserState::ExpectingUrl => {
+        EditorParserState::ExpectingUrl => {
             let (input, space) = multispace0(input)?;
 
             if !space.is_empty() {
@@ -249,11 +224,11 @@ fn parse_curlman_editor_line<'a, 'b>(
             if !space.is_empty() {
                 line_tokens.push(CurlmanToken::Whitespace(space));
             }
-            *parser_state = RequestParserState::ExpectingParamKey;
+            *parser_state = EditorParserState::ExpectingParamKey;
 
             return Ok((input, line_tokens));
         }
-        RequestParserState::ExpectingParamKey => {
+        EditorParserState::ExpectingParamKey => {
             let (input, space) = multispace0(input)?;
 
             if !space.is_empty() {
@@ -264,7 +239,7 @@ fn parse_curlman_editor_line<'a, 'b>(
 
             match separator_res {
                 Ok((input, separator)) => {
-                    *parser_state = RequestParserState::ExpectingCurl;
+                    *parser_state = EditorParserState::ExpectingCurl;
                     line_tokens.push(CurlmanToken::Separator(separator));
                     return Ok((input, line_tokens));
                 }
@@ -282,10 +257,10 @@ fn parse_curlman_editor_line<'a, 'b>(
             if !space.is_empty() {
                 line_tokens.push(CurlmanToken::Whitespace(space));
             }
-            *parser_state = RequestParserState::ExpectingParamValueStart;
+            *parser_state = EditorParserState::ExpectingParamValueStart;
             return Ok((input, line_tokens));
         }
-        RequestParserState::ExpectingParamValueStart => {
+        EditorParserState::ExpectingParamValueStart => {
             let (input, space) = multispace0(input)?;
             if !space.is_empty() {
                 line_tokens.push(CurlmanToken::Whitespace(space));
@@ -302,7 +277,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                     if !space.is_empty() {
                         line_tokens.push(CurlmanToken::Whitespace(space));
                     }
-                    *parser_state = RequestParserState::ExpectingParamKey;
+                    *parser_state = EditorParserState::ExpectingParamKey;
                     Ok((input, line_tokens))
                 }
                 Err(_) => {
@@ -310,7 +285,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                     match string_parse_res {
                         Ok((input, string)) => {
                             line_tokens.push(CurlmanToken::ParamValue(string));
-                            *parser_state = RequestParserState::ExpectingParamKey;
+                            *parser_state = EditorParserState::ExpectingParamKey;
                             Ok((input, line_tokens))
                         }
                         Err(_) => {
@@ -320,8 +295,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                             if !space.is_empty() {
                                 line_tokens.push(CurlmanToken::Whitespace(space));
                             }
-                            *parser_state =
-                                RequestParserState::ExpectingParamValueEnd(string_start);
+                            *parser_state = EditorParserState::ExpectingParamValueEnd(string_start);
 
                             Ok((input, line_tokens))
                         }
@@ -329,7 +303,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                 }
             };
         }
-        RequestParserState::ExpectingParamValueEnd(ref delimiter) => {
+        EditorParserState::ExpectingParamValueEnd(ref delimiter) => {
             let line_consume_res = is_not::<_, _, nom::error::Error<&str>>(*delimiter)(input);
 
             match line_consume_res {
@@ -341,7 +315,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                     match end_string_res {
                         Ok((input, end)) => {
                             line_tokens.push(CurlmanToken::ParamValue(end));
-                            *parser_state = RequestParserState::ExpectingParamKey;
+                            *parser_state = EditorParserState::ExpectingParamKey;
                             Ok((input, line_tokens))
                         }
                         Err(_) => Ok((input, line_tokens)),
@@ -353,7 +327,7 @@ fn parse_curlman_editor_line<'a, 'b>(
                     match end_string_res {
                         Ok((input, end)) => {
                             line_tokens.push(CurlmanToken::ParamValue(end));
-                            *parser_state = RequestParserState::ExpectingParamKey;
+                            *parser_state = EditorParserState::ExpectingParamKey;
                             Ok((input, line_tokens))
                         }
                         Err(_) => Ok((input, line_tokens)),
@@ -367,7 +341,7 @@ fn parse_curlman_editor_line<'a, 'b>(
 pub fn parse_curlman_editor<'a>(input: &'a Vec<String>) -> Vec<Vec<CurlmanToken<'a>>> {
     let mut editor_tokens = Vec::new();
     let mut line_tokens = Vec::new();
-    let mut parser_state = RequestParserState::ExpectingCurl;
+    let mut parser_state = EditorParserState::ExpectingCurl;
 
     for line in input {
         let mut curr_str: &str = line;

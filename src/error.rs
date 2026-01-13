@@ -12,6 +12,7 @@ pub enum Error {
 pub mod parser {
     pub enum Error {
         InvalidUrl(String),
+        InvalidFlag(String),
     }
 }
 

@@ -1,7 +1,6 @@
 use crate::{editor::CurlmanWidget, keys, AppState};
 use http::method::Method;
 use std::{collections::HashMap, str::FromStr, time::Duration};
-use url::Url;
 
 pub struct LayoutParent {
     pub layout_idx: u32,
@@ -111,51 +110,139 @@ impl RequestInfo {
 impl Default for RequestInfo {
     fn default() -> Self {
         Self {
-            flags: vec![],
             headers: HashMap::new(),
             method: Method::GET,
             url: None,
             timeout: Duration::from_secs(30),
             body: None,
+            flags: vec![],
         }
     }
-}
-
-pub enum BodyType {
-    Json,
 }
 
 #[derive(PartialEq, Debug, Clone)]
-pub enum CurlFlag {
+pub enum CurlFlagType {
     Insecure,
-}
-
-pub enum CurlmanRequestParamType {
     Method,
     Header,
-    Body(BodyType),
-    Timeout,
+    DataAscii,
+    Json,
+    ConnectionTimeout,
+    BasicAuth,
+    Compression,
+    SetCookie,
+    WriteCookie,
+    CreateDirs,
+    DataBinary,
+    DataRaw,
+    DataUrlEncode,
+    Digest,
+    User,
+    Expect100Timeout,
+    Follow,
+    Form,
+    FormEscape,
+    FormString,
+    Head,
+    Http09,
+    Http1,
+    Http11,
+    Http2,
+    Http2PriorKnowledge,
+    Http3,
+    KeepAliveCount,
+    KeepAliveTime,
+    Interface,
+    LimitRate,
+    SpeedLimit,
+    Location,
+    LocationTrusted,
+    MaxTime,
+    NoBuffer,
+    Ntlm,
+    Oauth2Bearer,
+    Output,
+    OutputDir,
+    Proto,
+    Rate,
+    Raw,
+    Retry,
+    RetryDelay,
+    RetryMaxTime,
+    SpeedTime,
+    Url,
+    UrlQuery,
+    RequestTarget,
 }
 
-impl FromStr for CurlmanRequestParamType {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "-X" => Ok(Self::Method),
-            "-H" => Ok(Self::Header),
-            "-d" | "--data" => Ok(Self::Body(BodyType::Json)),
-            "-m" | "--max" => Ok(Self::Timeout),
-            _ => Err(()),
-        }
+#[derive(PartialEq, Debug, Clone)]
+pub struct CurlFlag {
+    flag_type: CurlFlagType,
+    value: Option<String>,
+}
+
+impl CurlFlag {
+    pub fn new(flag_type: CurlFlagType, value: Option<String>) -> Self {
+        Self { flag_type, value }
     }
 }
 
-impl FromStr for CurlFlag {
-    type Err = ();
+impl FromStr for CurlFlagType {
+    type Err = crate::error::parser::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use crate::error::parser::Error;
         match s {
-            "--insecure" | "-k" => Ok(CurlFlag::Insecure),
-            _ => Err(()),
+            "--basic" => Ok(CurlFlagType::BasicAuth),
+            "--compressed" => Ok(CurlFlagType::Compression),
+            "--connect-timeout" => Ok(CurlFlagType::ConnectionTimeout),
+            "-b" | "--cookie" => Ok(CurlFlagType::SetCookie),
+            "-c" | "--cookie-jar" => Ok(CurlFlagType::WriteCookie),
+            "--create-dirs" => Ok(CurlFlagType::CreateDirs),
+
+            "--insecure" | "-k" => Ok(CurlFlagType::Insecure),
+            "-X" | "--request" => Ok(Self::Method),
+            "-d" | "--data" | "--data-ascii" => Ok(Self::DataAscii),
+            "--data-binary" => Ok(Self::DataBinary),
+            "--data-raw" => Ok(Self::DataRaw),
+            "--data-urlencode" => Ok(Self::DataUrlEncode),
+            "--digest" => Ok(Self::Digest),
+            "--expect100-timeout" => Ok(Self::Expect100Timeout),
+            "--follow" => Ok(Self::Follow),
+            "-F" | "--form" => Ok(Self::Form),
+            "--form-string" => Ok(Self::FormString),
+            "--form-escape" => Ok(Self::FormEscape),
+            "-m" | "--max" => Ok(Self::MaxTime),
+            "-H" | "--header" => Ok(Self::Header),
+            "--http0.9" => Ok(Self::Http09),
+            "-0 | --http1.0" => Ok(Self::Http1),
+            "--http1.1" => Ok(Self::Http11),
+            "--http2" => Ok(Self::Http2),
+            "--http2-prior-knowledge" => Ok(Self::Http2PriorKnowledge),
+            "--http3" => Ok(Self::Http3),
+            "--interface" => Ok(Self::Interface),
+            "--json" => Ok(Self::Json),
+            "--keepalive-cnt" => Ok(Self::KeepAliveCount),
+            "--keepalive-time" => Ok(Self::KeepAliveTime),
+            "--limit-rate" => Ok(Self::LimitRate),
+            "-L" | "--location" => Ok(Self::Location),
+            "--location-trusted" => Ok(Self::LocationTrusted),
+            "-N" | "--no-buffer" => Ok(Self::NoBuffer),
+            "--ntlm" => Ok(Self::Ntlm),
+            "--oauth2-bearer" => Ok(Self::Oauth2Bearer),
+            "-o" | "--output" => Ok(Self::Output),
+            "--output-dir" => Ok(Self::OutputDir),
+            "--rate" => Ok(Self::Rate),
+            "--raw" => Ok(Self::Raw),
+            "--request-target" => Ok(Self::RequestTarget),
+            "--retry" => Ok(Self::Retry),
+            "--retry-delay" => Ok(Self::RetryDelay),
+            "--retry-max-time" => Ok(Self::RetryMaxTime),
+            "--speed-limit" => Ok(Self::SpeedLimit),
+            "--speed-time" => Ok(Self::SpeedTime),
+            "--url" => Ok(Self::Url),
+            "--url-query" => Ok(Self::UrlQuery),
+            "-u" | "--user-agent" => Ok(Self::User),
+            _ => Err(Error::InvalidFlag(s.to_string())),
         }
     }
 }

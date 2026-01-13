@@ -95,25 +95,25 @@ impl RequestExecutor {
         &self,
         template_string: &'a str,
     ) -> Result<Cow<'a, str>, Error> {
-        enum ParserState {
+        enum UrlTemplateParser {
             Looking,
             Open,
         }
 
-        let mut state = ParserState::Looking;
+        let mut state = UrlTemplateParser::Looking;
         let mut populated_string = String::new();
         let mut template_var_start = 0;
         let mut non_template_slice_start = 0;
 
         for (idx, ch) in template_string.char_indices() {
             match state {
-                ParserState::Looking if ch == '{' => {
+                UrlTemplateParser::Looking if ch == '{' => {
                     let to_consume = &template_string[non_template_slice_start..idx];
                     populated_string.push_str(to_consume);
                     template_var_start = idx + 1;
-                    state = ParserState::Open;
+                    state = UrlTemplateParser::Open;
                 }
-                ParserState::Open if ch == '}' => {
+                UrlTemplateParser::Open if ch == '}' => {
                     non_template_slice_start = idx + 1;
                     let desired_key = &template_string[template_var_start..idx];
                     match self.env.vars.get(desired_key) {
@@ -122,7 +122,7 @@ impl RequestExecutor {
                         }
                         None => return Err(Error::UnknownVar(desired_key.to_string())),
                     }
-                    state = ParserState::Looking;
+                    state = UrlTemplateParser::Looking;
                 }
                 _ => {}
             }
@@ -133,10 +133,6 @@ impl RequestExecutor {
         } else {
             Ok(Cow::Owned(populated_string))
         }
-    }
-
-    pub fn load_env(&mut self) -> Result<(), Error> {
-        Ok(())
     }
 
     pub fn perform_curl_request(&mut self) -> Result<(), Error> {
@@ -159,11 +155,8 @@ impl RequestExecutor {
         self.handle.ssl_verify_peer(false)?;
         self.handle.ssl_verify_host(false)?;
 
-        for flag in req.flags {
-            match flag {
-                crate::types::CurlFlag::Insecure => {}
-            }
-        }
+        for flag in req.flags {}
+
         self.handle.http_headers(header_list)?;
         self.handle.timeout(req.timeout)?;
 
@@ -191,6 +184,7 @@ impl RequestExecutor {
                     };
                     true
                 })?;
+
                 transfer.write_function(|data| {
                     self.output_data.extend_from_slice(data);
                     Ok(data.len())

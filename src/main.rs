@@ -372,7 +372,7 @@ fn main() -> Result<(), crate::error::Error> {
 
     let parent_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Fill(1), Constraint::Percentage(85)]);
+        .constraints([Constraint::Fill(1), Constraint::Percentage(60)]);
 
     let inner_layout = Layout::default()
         .direction(Direction::Horizontal)
