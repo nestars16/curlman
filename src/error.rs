@@ -10,9 +10,11 @@ pub enum Error {
 }
 
 pub mod parser {
+    #[derive(Debug, PartialEq)]
     pub enum Error {
         InvalidUrl(String),
         InvalidFlag(String),
+        InvalidFlagValue(String),
     }
 }
 

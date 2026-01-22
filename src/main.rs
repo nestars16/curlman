@@ -3,6 +3,7 @@ mod cursor_movements;
 mod editor;
 mod error;
 mod executor;
+mod new_parser;
 mod parser;
 mod types;
 

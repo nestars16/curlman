@@ -2,7 +2,7 @@ use crate::{
     cursor_movements::{CursorMoveDirection, CursorMovement},
     error::Error,
     keys,
-    parser::{parse_curlman_editor, CurlmanToken},
+    parser::{parse_curlman_editor, CurlmanColorToken},
     types::RequestInfo,
     AppState,
 };
@@ -1015,14 +1015,14 @@ impl<'editor> Editor<'editor> {
             let mut render_col_offset = 0;
             for token in line {
                 match token {
-                    CurlmanToken::Curl(text)
-                    | CurlmanToken::Url(text)
-                    | CurlmanToken::ParamKey(text)
-                    | CurlmanToken::ParamValue(text)
-                    | CurlmanToken::Whitespace(text)
-                    | CurlmanToken::Separator(text)
-                    | CurlmanToken::Unknown(text)
-                    | CurlmanToken::EnvVariable(text) => {
+                    CurlmanColorToken::Curl(text)
+                    | CurlmanColorToken::Url(text)
+                    | CurlmanColorToken::ParamKey(text)
+                    | CurlmanColorToken::ParamValue(text)
+                    | CurlmanColorToken::Whitespace(text)
+                    | CurlmanColorToken::Separator(text)
+                    | CurlmanColorToken::Unknown(text)
+                    | CurlmanColorToken::EnvVariable(text) => {
                         let color = token.get_color(&colorscheme);
                         (remaining_space, render_col_offset, overflow_lines) =
                             fit_tokens_into_editor(
