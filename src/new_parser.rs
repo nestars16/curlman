@@ -167,6 +167,7 @@ pub fn parse_tokens_into_ir(
     }
 
     let mut state = State::LookingForUrl;
+
     macro_rules! push_flag {
         ($flag_type:expr, $idx:expr, $value:expr, $value_token_idx:expr) => {{
             let needs_value = $flag_type.needs_value();
@@ -225,7 +226,13 @@ pub fn parse_tokens_into_ir(
                 if *token_type == CurlmanTokenType::Word
                     || *token_type == CurlmanTokenType::String =>
             {
-                let url = Url::parse(lexeme).map_err(|e| {
+                let url_lexeme = if *token_type == CurlmanTokenType::String {
+                    &lexeme[1..lexeme.len() - 1] // lets hope its not a utf-8 character!
+                } else {
+                    lexeme
+                };
+
+                let url = Url::parse(url_lexeme).map_err(|e| {
                     crate::error::parser::Error::InvalidUrl(format!("Invalid url: {e:?}"))
                 })?;
 
@@ -427,6 +434,7 @@ mod tests {
               --data-raw '{ "start":"2022-08-16T20:30:00Z","end":"2022-08-16T20:31:00","bucket":"cloudflare-logs" }'
             "#,
             */
+            /*
             r#"
             curl --request POST 'http://localhost:8787/cdn-cgi/handler/email' \
               --url-query 'from=sender@example.com' \
@@ -440,7 +448,6 @@ mod tests {
             Subject: Testing Email Workers Local Dev
             Hi there'
             "#,
-            /*
             r#"
             curl "https://api.openai.com/v1/responses" \
               -H "Content-Type: application/json" \
@@ -465,8 +472,6 @@ mod tests {
               --header 'Authorization: Bearer <accessToken>' \
               --data-raw '{ "templateId": "scim" }'
             "#,
-            */
-
             r#"
             curl -X POST 'https://api-m.sandbox.paypal.com/v1/customer/disputes' \
               -H 'Authorization: Bearer <ACCESS TOKEN>' \
@@ -474,13 +479,31 @@ mod tests {
               -H 'PayPal-Auth-Assertion: <JWT TOKEN>' \
               -F 'input={"disputed_transactions":[{"buyer_transaction_id":<BUYER TRANSACTION ID>}],"reason":"MERCHANDISE_OR_SERVICE_NOT_RECEIVED","dispute_amount":{"currency_code":"USD","value":"7.50"}}; type=application/json'
             "#,
+            */
         ]
         .into_iter()
-        .map(|i| lex_curlman_request(i.into()).map(|res| res.1))
+        .map(|i: &'static str| lex_curlman_request(i.into()).map(|res| res.1))
         .collect::<Vec<_>>();
 
         let expected = vec![];
 
         assert_eq!(inputs, expected)
+    }
+
+    #[test]
+    fn test_ir_parsing() {
+        let inputs = vec![
+            r#"curl -kLN -X POST 'https://google.com' \
+              --header 'Content-Type: application/json' \
+              --header 'Authorization: Bearer <accessToken>' \
+              --data-raw '{ "templateId": "scim" }'"#,
+        ]
+        .into_iter()
+        .map(|i| lex_curlman_request(i.into()).map(|res| parse_tokens_into_ir(&res.1)))
+        .collect::<Vec<_>>();
+
+        let expected = vec![];
+
+        assert_eq!(inputs, expected);
     }
 }
