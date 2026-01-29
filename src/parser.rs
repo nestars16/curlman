@@ -1,26 +1,108 @@
-use std::ops::Range;
-
+use http::Request;
 use nom::{
     branch::alt,
     bytes::complete::{escaped, is_not, tag, take, take_till, take_while, take_while1},
-    character::complete::{char, multispace0, multispace1, none_of, one_of},
+    character::complete::{multispace0, multispace1, none_of, one_of},
     combinator::{map, opt, recognize, value},
-    error::{context, Error, VerboseError, VerboseErrorKind},
-    multi::{many0, many1, separated_list0},
+    error::{context, Error, VerboseError},
+    multi::{many0, many1},
     number::complete::recognize_float,
-    sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
-    IResult,
+    sequence::{pair, preceded, terminated, tuple},
+    IResult, Slice,
 };
-
-use nom_locate::LocatedSpan;
 
 use ratatui::style::Color;
+
+use crate::editor::colors::{EditorColorscheme, JsonOutputColorscheme};
+use crate::types::{
+    CurlFlag, CurlFlagType, CurlmanIr, CurlmanToken, CurlmanTokenType, EditorParserState,
+    RequestInfo, Span,
+};
+
+use crate::error::parser;
+use crate::error::parser::{ErrorKind, ErrorStage};
+
 use url::Url;
 
-use crate::{
-    editor::colors::{EditorColorscheme, JsonOutputColorscheme},
-    types::{CurlFlag, CurlFlagType, RequestInfo},
-};
+fn error_from_token(
+    token: &CurlmanToken,
+    kind: ErrorKind,
+    message: String,
+    context: Vec<String>,
+) -> parser::Error {
+    parser::Error::new(
+        kind,
+        ErrorStage::Ir,
+        token.span.location_line() as usize,
+        token.span.get_column(),
+        message,
+        context,
+    )
+}
+
+fn error_from_span(
+    span: Span,
+    kind: ErrorKind,
+    stage: ErrorStage,
+    message: String,
+    context: Vec<String>,
+) -> parser::Error {
+    parser::Error::new(
+        kind,
+        stage,
+        span.location_line() as usize,
+        span.get_column(),
+        message,
+        context,
+    )
+}
+
+fn error_from_nom(input: &str, err: nom::Err<VerboseError<Span>>) -> parser::Error {
+    match err {
+        nom::Err::Incomplete(_) => error_from_span(
+            Span::new(input).slice(input.len()..),
+            ErrorKind::InvalidRequest("Incomplete input".to_string()),
+            ErrorStage::Lexing,
+            "Incomplete input".to_string(),
+            Vec::new(),
+        ),
+        nom::Err::Error(verbose) | nom::Err::Failure(verbose) => {
+            let mut context = Vec::new();
+            let mut last_span: Option<Span> = None;
+
+            for (span, kind) in &verbose.errors {
+                last_span = Some(*span);
+                if let nom::error::VerboseErrorKind::Context(ctx) = kind {
+                    context.push((*ctx).to_string());
+                }
+            }
+
+            let message = if context.is_empty() {
+                "Invalid request".to_string()
+            } else {
+                format!("Invalid request: {}", context.join(" > "))
+            };
+
+            if let Some(span) = last_span {
+                error_from_span(
+                    span,
+                    ErrorKind::InvalidRequest(message.clone()),
+                    ErrorStage::Lexing,
+                    message,
+                    context,
+                )
+            } else {
+                error_from_span(
+                    Span::new(input).slice(input.len()..),
+                    ErrorKind::InvalidRequest(message.clone()),
+                    ErrorStage::Lexing,
+                    message,
+                    context,
+                )
+            }
+        }
+    }
+}
 
 fn string_parser_global(input: &str) -> IResult<&str, &str> {
     let double_quoted = tuple((
@@ -28,14 +110,320 @@ fn string_parser_global(input: &str) -> IResult<&str, &str> {
         escaped(none_of("\\\""), '\\', take(1usize)),
         tag("\""),
     ));
+
     let single_quoted = tuple((
         tag::<_, _, Error<&str>>("\'"),
         escaped(none_of("\\\'"), '\\', take(1usize)),
         tag("\'"),
     ));
+
     let mut string_parser = recognize(alt((double_quoted, single_quoted)));
 
     string_parser(input)
+}
+
+pub fn parse_short_flag(input: Span) -> IResult<Span, CurlmanToken, VerboseError<Span>> {
+    context(
+        "short flag",
+        map(
+            recognize(pair(
+                tag("-"),
+                take_while1(|ch: char| !ch.is_whitespace() && ch != '-'),
+            )),
+            |m: Span| CurlmanToken::from_span(m, CurlmanTokenType::ShortFlag),
+        ),
+    )(input)
+}
+
+pub fn parse_long_flag(input: Span) -> IResult<Span, CurlmanToken, VerboseError<Span>> {
+    context(
+        "long flag",
+        map(
+            recognize(pair(
+                tag("--"),
+                take_while1(|ch: char| ch.is_alphanumeric() || ch == '-' || ch == '.'),
+            )),
+            |flag: Span| CurlmanToken::from_span(flag, CurlmanTokenType::Flag),
+        ),
+    )(input)
+}
+
+pub fn parse_word(input: Span) -> IResult<Span, CurlmanToken, VerboseError<Span>> {
+    let double_quoted = recognize(tuple((
+        tag::<_, _, _>("\""),
+        escaped(none_of("\\\""), '\\', take(1usize)),
+        tag("\""),
+    )));
+
+    let single_quoted = recognize(tuple((
+        tag::<_, _, _>("\'"),
+        escaped(none_of("\\\'"), '\\', take(1usize)),
+        tag("\'"),
+    )));
+
+    let unquoted = take_while1(|ch: char| !ch.is_whitespace() && ch != '"' && ch != '\'');
+
+    let word_parser = context(
+        "word",
+        recognize(many1(alt((double_quoted, single_quoted, unquoted)))),
+    );
+
+    map(word_parser, |tag: Span| {
+        CurlmanToken::from_span(tag, CurlmanTokenType::Word)
+    })(input)
+}
+
+pub fn parse_string(input: Span) -> IResult<Span, CurlmanToken, VerboseError<Span>> {
+    let double_quoted = recognize(tuple((
+        tag::<_, _, _>("\""),
+        escaped(none_of("\\\""), '\\', take(1usize)),
+        tag("\""),
+    )));
+    let single_quoted = recognize(tuple((
+        tag::<_, _, _>("\'"),
+        escaped(none_of("\\\'"), '\\', take(1usize)),
+        tag("\'"),
+    )));
+
+    let string_parser = context("string", recognize(alt((double_quoted, single_quoted))));
+
+    map(string_parser, |tag: Span| {
+        CurlmanToken::from_span(tag, CurlmanTokenType::String)
+    })(input)
+}
+
+pub fn parse_value(input: Span) -> IResult<Span, CurlmanToken, VerboseError<Span>> {
+    context("value", alt((parse_string, parse_word)))(input)
+}
+
+pub fn parse_token(input: Span) -> IResult<Span, CurlmanToken, VerboseError<Span>> {
+    context(
+        "token",
+        alt((parse_short_flag, parse_long_flag, parse_value)),
+    )(input)
+}
+
+fn bash_ws0(input: Span) -> IResult<Span, (), VerboseError<Span>> {
+    let line_cont = value(
+        (),
+        tuple((
+            tag::<_, _, _>("\\"),
+            opt(tag::<_, _, _>("\r")),
+            tag::<_, _, _>("\n"),
+        )),
+    );
+
+    context(
+        "whitespace",
+        value((), many0(alt((value((), multispace1), line_cont)))),
+    )(input)
+}
+
+pub fn lex_curlman_request(input: Span) -> IResult<Span, Vec<CurlmanToken>, VerboseError<Span>> {
+    let (input, _) = bash_ws0(input)?;
+    let (input, _) = context("curl tag", tag("curl"))(input)?;
+    let (input, tokens) = context(
+        "request",
+        preceded(bash_ws0, many0(terminated(parse_token, bash_ws0))),
+    )(input)?;
+
+    Ok((input, tokens))
+}
+
+pub fn parse_tokens_into_ir(
+    tokens: &[CurlmanToken],
+) -> Result<Vec<CurlmanIr>, crate::error::parser::Error> {
+    let mut out = Vec::with_capacity(10);
+
+    enum State {
+        LookingForFlagValue,
+        LookingForUrl,
+    }
+
+    let mut state = State::LookingForUrl;
+
+    macro_rules! push_flag {
+        ($flag_type:expr, $idx:expr, $value:expr, $value_token_idx:expr) => {{
+            let needs_value = $flag_type.needs_value();
+            let has_value = $value.is_some();
+
+            out.push(CurlmanIr::Flag {
+                flag_token_idx: $idx,
+                value_token_idx: $value_token_idx,
+                value: CurlFlag::new($flag_type, $value),
+            });
+
+            state = if needs_value && !has_value {
+                State::LookingForFlagValue
+            } else {
+                State::LookingForUrl
+            };
+        }};
+    }
+
+    for (idx, token) in tokens.iter().enumerate() {
+        let CurlmanToken {
+            token_type, lexeme, ..
+        } = token;
+
+        match state {
+            State::LookingForFlagValue
+                if *token_type == CurlmanTokenType::Flag
+                    || *token_type == CurlmanTokenType::ShortFlag =>
+            {
+                let message = format!("Expected flag value and got token: {token:?}");
+                return Err(error_from_token(
+                    token,
+                    ErrorKind::InvalidFlagValue(message.clone()),
+                    message,
+                    Vec::new(),
+                ));
+            }
+            State::LookingForFlagValue => {
+                let value = Some(lexeme.to_string());
+
+                match out.last_mut() {
+                    Some(CurlmanIr::Flag {
+                        value_token_idx,
+                        value: flag,
+                        ..
+                    }) => {
+                        *value_token_idx = Some(idx);
+                        flag.value = value;
+                    }
+                    _ => {
+                        let message =
+                            format!("Expected flag value but no flag was provided beforehand");
+                        return Err(error_from_token(
+                            token,
+                            ErrorKind::InvalidFlagValue(message.clone()),
+                            message,
+                            Vec::new(),
+                        ));
+                    }
+                }
+
+                state = State::LookingForUrl;
+            }
+            State::LookingForUrl
+                if *token_type == CurlmanTokenType::Word
+                    || *token_type == CurlmanTokenType::String =>
+            {
+                let url_lexeme = if *token_type == CurlmanTokenType::String {
+                    &lexeme[1..lexeme.len() - 1] // lets hope its not a utf-8 character!
+                } else {
+                    lexeme
+                };
+
+                let url = Url::parse(url_lexeme).map_err(|e| {
+                    let message = format!("Invalid url: {e:?}");
+                    error_from_token(
+                        token,
+                        ErrorKind::InvalidUrl(message.clone()),
+                        message,
+                        Vec::new(),
+                    )
+                })?;
+
+                out.push(CurlmanIr::Url {
+                    token_idx: idx,
+                    value: url,
+                })
+            }
+            State::LookingForUrl => {
+                if let Ok(flag_type) = lexeme.parse::<CurlFlagType>() {
+                    push_flag!(flag_type, idx, Option::<String>::None, None);
+                } else if token.token_type == CurlmanTokenType::ShortFlag {
+                    //there are two possible scenarios here
+                    //1. the short flag takes an argument and it is together ie. -XPOST
+                    //2. its a combination of short flags in succession
+                    // my reasoning for this is, if there didnt exist a CurlFlagType for this
+                    // string its because it meets one of the two above criteria
+                    // so we need to strip the first flag and check which of the two outcomes
+                    match token.lexeme.slice(0..2).parse::<CurlFlagType>() {
+                        Ok(flag_type) => {
+                            let inline_value = token.lexeme.slice(2..);
+                            match (flag_type.needs_value(), inline_value.is_empty()) {
+                                (true, false) => {
+                                    push_flag!(
+                                        flag_type,
+                                        idx,
+                                        Some(inline_value.to_string()),
+                                        Some(idx)
+                                    );
+                                }
+                                (true, true) => {
+                                    push_flag!(flag_type, idx, Option::<String>::None, None);
+                                }
+                                (false, _) => {
+                                    push_flag!(flag_type, idx, Option::<String>::None, None);
+
+                                    for ch in token.lexeme.slice(2..).chars() {
+                                        let short = format!("-{ch}");
+                                        let next_flag =
+                                            short.parse::<CurlFlagType>().map_err(|_| {
+                                                let message = format!("Invalid flag: {short}");
+                                                error_from_token(
+                                                    token,
+                                                    ErrorKind::InvalidFlag(message.clone()),
+                                                    message,
+                                                    Vec::new(),
+                                                )
+                                            })?;
+
+                                        if next_flag.needs_value() {
+                                            let message = format!(
+                                                "Unexpected value flag in short flag chain: {short}"
+                                            );
+                                            return Err(error_from_token(
+                                                token,
+                                                ErrorKind::InvalidFlagValue(message.clone()),
+                                                message,
+                                                Vec::new(),
+                                            ));
+                                        }
+                                        push_flag!(next_flag, idx, Option::<String>::None, None);
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let message = format!("Expected flag value and got token: {token:?}");
+                            return Err(error_from_token(
+                                token,
+                                ErrorKind::InvalidFlagValue(message.clone()),
+                                message,
+                                Vec::new(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn parse_curlman_request(request_str: &str) -> Result<RequestInfo, parser::Error> {
+    let (_, tokens) =
+        lex_curlman_request(request_str.into()).map_err(|err| error_from_nom(request_str, err))?;
+    let ir_repr = parse_tokens_into_ir(&tokens)?;
+
+    let mut output = RequestInfo::default();
+
+    for ir_token in ir_repr {
+        ir_token
+    }
+
+    Ok(output)
+}
+
+pub fn parse_curlman_request_file(file_contents: &str) -> Result<Vec<RequestInfo>, parser::Error> {
+    file_contents
+        .split("===")
+        .map(|r| parse_curlman_request(r))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -76,78 +464,6 @@ impl<'a> CurlmanColorToken<'a> {
             CurlmanColorToken::EnvVariable(_) => Color::White,
         }
     }
-}
-
-fn parse_curl_params<'a>(input: &'a str) -> IResult<&'a str, RequestInfo, VerboseError<&'a str>> {
-    let string_parser = alt((
-        delimited(char('"'), take_till(|ch: char| ch == '"'), char('"')),
-        delimited(char('\''), take_till(|ch: char| ch == '\''), char('\'')),
-    ));
-
-    let (input, _) = multispace0(input)?;
-    let tag_parser = take_while(|ch: char| ch.is_ascii_alphanumeric());
-    let param_parser = recognize(pair(
-        take_while(|ch: char| ch == '-'),
-        take_while(|ch: char| ch.is_ascii_alphanumeric()),
-    ));
-    let (input, params) = separated_list0(
-        multispace1,
-        separated_pair(param_parser, multispace1, alt((string_parser, tag_parser))),
-    )(input)?;
-
-    let mut request_info = RequestInfo::default();
-
-    for (param_type, value) in params {}
-
-    Ok((input, request_info))
-}
-
-pub fn parse_curlman_request(input: &str) -> IResult<&str, RequestInfo, VerboseError<&str>> {
-    let (input, _) = multispace0(input)?;
-    let (input, _) = tag("curl")(input)?;
-    let (input, _) = multispace1(input)?;
-    let (input, url_str) = take_till(char::is_whitespace)(input)?;
-
-    let url_res: Result<Url, _> = url_str.parse();
-
-    let Ok(url) = url_res else {
-        return Err(nom::Err::Failure(VerboseError {
-            errors: vec![(url_str, VerboseErrorKind::Context("Invalid Url"))],
-        }));
-    };
-
-    if input.is_empty() {
-        return Ok(("", RequestInfo::default_with_url(url_str.to_string())));
-    }
-
-    let (input, _) = multispace1(input)?;
-
-    let (input, mut request_builder) = parse_curl_params(input)?;
-    let (input, _) = multispace0(input)?;
-
-    request_builder.url = Some(url_str.to_string());
-    Ok((input, request_builder))
-}
-
-pub fn parse_curlman_request_file(
-    input: &str,
-) -> IResult<&str, Vec<RequestInfo>, VerboseError<&str>> {
-    let (input, requests) = separated_list0(tag("==="), parse_curlman_request)(input)?;
-    Ok((input, requests))
-}
-
-struct Request {
-    info: RequestInfo,
-    name: String,
-}
-
-#[derive(Debug)]
-enum EditorParserState<'a> {
-    ExpectingCurl,
-    ExpectingUrl,
-    ExpectingParamKey,
-    ExpectingParamValueStart,
-    ExpectingParamValueEnd(&'a str),
 }
 
 fn parse_curlman_editor_line<'a, 'b>(

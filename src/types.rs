@@ -1,6 +1,9 @@
 use crate::{editor::CurlmanWidget, keys, AppState};
-use http::method::Method;
+use curl::Version;
+use http::method::{self, Method};
+use nom_locate::LocatedSpan;
 use std::{collections::HashMap, str::FromStr, time::Duration};
+use url::Url;
 
 pub struct LayoutParent {
     pub layout_idx: u32,
@@ -90,10 +93,9 @@ pub struct RequestInfoFileMetadata {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestInfo {
-    pub headers: HashMap<String, String>,
+    pub headers: Vec<String>,
     pub url: Option<String>,
     pub method: Method,
-    pub timeout: Duration,
     pub body: Option<Vec<u8>>,
     pub flags: Vec<CurlFlag>,
 }
@@ -110,10 +112,9 @@ impl RequestInfo {
 impl Default for RequestInfo {
     fn default() -> Self {
         Self {
-            headers: HashMap::new(),
+            headers: Vec::new(),
             method: Method::GET,
             url: None,
-            timeout: Duration::from_secs(30),
             body: None,
             flags: vec![],
         }
@@ -122,7 +123,6 @@ impl Default for RequestInfo {
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum CurlFlagType {
-    UploadFile,
     Get,
     Head,
     Insecure,
@@ -133,7 +133,6 @@ pub enum CurlFlagType {
     Json,
     ConnectionTimeout,
     BasicAuth,
-    Compression,
     SetCookie,
     WriteCookie,
     CreateDirs,
@@ -167,7 +166,6 @@ pub enum CurlFlagType {
     Oauth2Bearer,
     Output,
     OutputDir,
-    Proto,
     Rate,
     Raw,
     Retry,
@@ -177,9 +175,6 @@ pub enum CurlFlagType {
     Url,
     UrlQuery,
     RequestTarget,
-    Post301,
-    Post302,
-    Post303,
     MaxRedirs,
 }
 
@@ -193,7 +188,6 @@ impl CurlFlagType {
             CurlFlagType::Json => true,
             CurlFlagType::ConnectionTimeout => true,
             CurlFlagType::BasicAuth => false,
-            CurlFlagType::Compression => false,
             CurlFlagType::SetCookie => true,
             CurlFlagType::WriteCookie => true,
             CurlFlagType::CreateDirs => false,
@@ -227,7 +221,6 @@ impl CurlFlagType {
             CurlFlagType::Oauth2Bearer => true,
             CurlFlagType::Output => true,
             CurlFlagType::OutputDir => true,
-            CurlFlagType::Proto => true,
             CurlFlagType::Rate => true,
             CurlFlagType::Raw => false,
             CurlFlagType::Retry => true,
@@ -238,11 +231,7 @@ impl CurlFlagType {
             CurlFlagType::UrlQuery => true,
             CurlFlagType::RequestTarget => true,
             CurlFlagType::Referer => true,
-            CurlFlagType::UploadFile => true,
             CurlFlagType::UserAgent => true,
-            CurlFlagType::Post301 => false,
-            CurlFlagType::Post302 => false,
-            CurlFlagType::Post303 => false,
             CurlFlagType::MaxRedirs => true,
             CurlFlagType::Get => false,
         }
@@ -262,12 +251,10 @@ impl CurlFlag {
 }
 
 impl FromStr for CurlFlagType {
-    type Err = crate::error::parser::Error;
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use crate::error::parser::Error;
         match s {
             "--basic" => Ok(CurlFlagType::BasicAuth),
-            "--compressed" => Ok(CurlFlagType::Compression),
             "--connect-timeout" => Ok(CurlFlagType::ConnectionTimeout),
             "-b" | "--cookie" => Ok(CurlFlagType::SetCookie),
             "-c" | "--cookie-jar" => Ok(CurlFlagType::WriteCookie),
@@ -311,7 +298,6 @@ impl FromStr for CurlFlagType {
             "-e" | "--referer" => Ok(Self::Referer),
             "-X" | "--request" => Ok(Self::Method),
             "--request-target" => Ok(Self::RequestTarget),
-            "-T" | "--upload-file" => Ok(Self::UploadFile),
             "--retry" => Ok(Self::Retry),
             "--retry-delay" => Ok(Self::RetryDelay),
             "--retry-max-time" => Ok(Self::RetryMaxTime),
@@ -321,10 +307,166 @@ impl FromStr for CurlFlagType {
             "--url" => Ok(Self::Url),
             "--url-query" => Ok(Self::UrlQuery),
             "-u" | "--user" => Ok(Self::User),
-            "--post301" => Ok(Self::Post301),
-            "--post302" => Ok(Self::Post302),
-            "--post303" => Ok(Self::Post303),
-            _ => Err(Error::InvalidFlag(s.to_string())),
+            _ => Err(s.to_string()),
         }
     }
+}
+
+pub type Span<'a> = LocatedSpan<&'a str>;
+
+#[derive(Debug, PartialEq)]
+pub struct CurlmanToken<'a> {
+    pub token_type: CurlmanTokenType,
+    pub lexeme: &'a str,
+    pub span: Span<'a>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum CurlmanIr {
+    Flag {
+        flag_token_idx: usize,
+        value_token_idx: Option<usize>,
+        value: CurlFlag,
+    },
+    Url {
+        token_idx: usize,
+        value: Url,
+    },
+}
+
+impl CurlmanIr {
+    pub fn modify_request(self, req: &mut RequestInfo) {
+        match self {
+            Self::Url { token_idx, value } => req.url = Some(value.to_string()),
+            CurlmanIr::Flag {
+                flag_token_idx,
+                value_token_idx,
+                value: flag,
+            } => match flag.flag_type {
+                CurlFlagType::Insecure
+                | CurlFlagType::ConnectionTimeout
+                | CurlFlagType::BasicAuth
+                | CurlFlagType::WriteCookie
+                | CurlFlagType::CreateDirs
+                | CurlFlagType::Digest
+                | CurlFlagType::User
+                | CurlFlagType::Expect100Timeout
+                | CurlFlagType::Follow
+                | CurlFlagType::Http09
+                | CurlFlagType::Http1
+                | CurlFlagType::Http11
+                | CurlFlagType::Http2
+                | CurlFlagType::Http2PriorKnowledge
+                | CurlFlagType::Http3
+                | CurlFlagType::KeepAliveCount
+                | CurlFlagType::KeepAliveTime
+                | CurlFlagType::Interface
+                | CurlFlagType::LimitRate
+                | CurlFlagType::SpeedLimit
+                | CurlFlagType::Location
+                | CurlFlagType::LocationTrusted
+                | CurlFlagType::MaxTime
+                | CurlFlagType::NoBuffer
+                | CurlFlagType::Ntlm
+                | CurlFlagType::Output
+                | CurlFlagType::OutputDir
+                | CurlFlagType::Rate
+                | CurlFlagType::Raw
+                | CurlFlagType::Retry
+                | CurlFlagType::RetryDelay
+                | CurlFlagType::RetryMaxTime
+                | CurlFlagType::SpeedTime
+                | CurlFlagType::UrlQuery
+                | CurlFlagType::RequestTarget
+                | CurlFlagType::MaxRedirs => {
+                    req.flags.push(flag);
+                }
+                CurlFlagType::Get => {
+                    req.method = Method::GET;
+                }
+                CurlFlagType::Head => {
+                    req.method = Method::HEAD;
+                }
+                CurlFlagType::UserAgent => {
+                    if let Some(value) = flag.value {
+                        req.headers.push(format!("User-Agent: {value}"))
+                    }
+                }
+                CurlFlagType::Method => {
+                    let method_string = flag.value.unwrap_or("GET".to_string());
+                    req.method = Method::from_str(&method_string).unwrap_or(Method::GET);
+                }
+                CurlFlagType::Header => {
+                    if let Some(header) = flag.value {
+                        req.headers.push(header)
+                    }
+                }
+                //TODO add interpretation of special characters and body appending
+                CurlFlagType::Data => req.body = Some(flag.value.unwrap_or_default().into()),
+                CurlFlagType::DataBinary => req.body = Some(flag.value.unwrap_or_default().into()),
+                CurlFlagType::DataRaw => req.body = Some(flag.value.unwrap_or_default().into()),
+                CurlFlagType::DataUrlEncode => {
+                    req.body = Some(flag.value.unwrap_or_default().into())
+                }
+                CurlFlagType::Json => {
+                    req.headers
+                        .push("Content-Type: application/json".to_string());
+                    req.headers.push("Accept: application/json".to_string());
+                    req.body = Some(flag.value.unwrap_or_default().into())
+                }
+                CurlFlagType::SetCookie => {
+                    if let Some(value) = flag.value {
+                        req.headers.push(format!("Cookie: {value}"));
+                    }
+                }
+                CurlFlagType::Referer => {
+                    if let Some(value) = flag.value {
+                        req.headers.push(format!("Referer: {value}"))
+                    }
+                }
+                CurlFlagType::Form => {}
+                CurlFlagType::FormEscape => {}
+                CurlFlagType::FormString => {}
+                CurlFlagType::Oauth2Bearer => {
+                    if let Some(value) = flag.value {
+                        req.headers.push(format!("Authorization: Bearer {value}"))
+                    }
+                }
+                CurlFlagType::Url => {
+                    if let Some(value) = flag.value {
+                        req.url = Some(value)
+                    }
+                }
+            },
+        }
+    }
+}
+
+impl<'a> CurlmanToken<'a> {
+    pub fn from_span(input: Span<'a>, token_type: CurlmanTokenType) -> Self {
+        let s: &str = *input.fragment();
+
+        Self {
+            token_type,
+            lexeme: s,
+            span: input,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum CurlmanTokenType {
+    Flag,
+    ShortFlag,
+    Word,
+    String,
+}
+
+#[derive(Debug)]
+pub enum EditorParserState<'a> {
+    ExpectingCurl,
+    ExpectingUrl,
+    ExpectingParamKey,
+    ExpectingParamValueStart,
+    ExpectingParamValueEnd(&'a str),
 }

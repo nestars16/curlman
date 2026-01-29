@@ -10,11 +10,50 @@ pub enum Error {
 }
 
 pub mod parser {
-    #[derive(Debug, PartialEq)]
-    pub enum Error {
-        InvalidUrl(String),
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Error {
+        pub kind: ErrorKind,
+        pub stage: ErrorStage,
+        pub line: usize,
+        pub column: usize,
+        pub message: String,
+        pub context: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ErrorStage {
+        Lexing,
+        Ir,
+        Parsing,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ErrorKind {
+        MissingUrl,
         InvalidFlag(String),
+        InvalidUrl(String),
         InvalidFlagValue(String),
+        InvalidRequest(String),
+    }
+
+    impl Error {
+        pub fn new(
+            kind: ErrorKind,
+            stage: ErrorStage,
+            line: usize,
+            column: usize,
+            message: impl Into<String>,
+            context: Vec<String>,
+        ) -> Self {
+            Self {
+                kind,
+                stage,
+                line,
+                column,
+                message: message.into(),
+                context,
+            }
+        }
     }
 }
 

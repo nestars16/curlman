@@ -3,7 +3,6 @@ mod cursor_movements;
 mod editor;
 mod error;
 mod executor;
-mod new_parser;
 mod parser;
 mod types;
 
@@ -142,7 +141,7 @@ impl App {
         self.save_into_request_file(&new_text)?;
 
         let requests = match parse_curlman_request_file(&new_text) {
-            Ok((_, parsed_requests)) => parsed_requests,
+            Ok(parsed_requests) => parsed_requests,
             Err(_) => Vec::new(),
         };
 
@@ -359,7 +358,7 @@ fn main() -> Result<(), crate::error::Error> {
 
     let request_browser_widget = Box::new(if let Some(buffer) = buffer {
         match parse_curlman_request_file(&buffer) {
-            Ok((_, parsed_requests)) => {
+            Ok(parsed_requests) => {
                 initial_requests_vec = Some(parsed_requests.clone());
                 let browser = editor::RequestBrowser::from(parsed_requests);
                 initally_selected_request = browser.selected_request_idx;

@@ -65,7 +65,7 @@ pub struct RequestExecutor {
     handle: Easy,
     output_data: Vec<u8>,
     editor: EditorInner,
-    headers: HashMap<HeaderName, String>,
+    output_headers: HashMap<HeaderName, String>,
     request: Option<RequestInfo>,
     view: RequestExecutorView,
     env: Enviroment,
@@ -80,7 +80,7 @@ impl RequestExecutor {
             selected: false,
             output_data: Vec::new(),
             request: None,
-            headers: HashMap::new(),
+            output_headers: HashMap::new(),
             handle: Easy::new(),
             editor: EditorInner::new(),
             body_cursor: None,
@@ -144,12 +144,12 @@ impl RequestExecutor {
             return Err(Error::MissingUrl("The Request URL is missing"));
         };
 
-        self.headers.clear();
+        self.output_headers.clear();
         self.handle.url(&self.populate_request_url(url.as_str())?)?;
 
         let mut header_list = curl::easy::List::new();
-        for (key, value) in req.headers {
-            header_list.append(&format!("{key}: {value}"))?;
+        for value in req.headers {
+            header_list.append(&value)?;
         }
 
         self.handle.ssl_verify_peer(false)?;
@@ -158,7 +158,6 @@ impl RequestExecutor {
         for flag in req.flags {}
 
         self.handle.http_headers(header_list)?;
-        self.handle.timeout(req.timeout)?;
 
         match req.method {
             Method::GET | Method::HEAD | Method::DELETE | Method::OPTIONS => {
@@ -178,7 +177,8 @@ impl RequestExecutor {
                                 break 'some_block;
                             };
 
-                            self.headers.insert(header_name, header_value.to_string());
+                            self.output_headers
+                                .insert(header_name, header_value.to_string());
                         }
                         None => {}
                     };
@@ -216,7 +216,8 @@ impl RequestExecutor {
                                 break 'some_block;
                             };
 
-                            self.headers.insert(header_name, header_value.to_string());
+                            self.output_headers
+                                .insert(header_name, header_value.to_string());
                         }
                         None => {}
                     };
@@ -270,7 +271,7 @@ impl RequestExecutor {
         self.output_data.clear();
         let perform_request_result = self.perform_curl_request();
         match perform_request_result {
-            Ok(_) => match self.headers.get(&http::header::CONTENT_TYPE) {
+            Ok(_) => match self.output_headers.get(&http::header::CONTENT_TYPE) {
                 Some(content_type) if content_type.as_str().contains("application/json") => {
                     self.editor = EditorInner::from(
                         JsonFormatter::format_output_data_into_lines(&self.output_data)
@@ -358,7 +359,7 @@ impl<'widget> StatefulWidgetRef for RequestExecutor {
             RequestExecutorView::Headers => {
                 let mut paragraph_buf = String::new();
 
-                self.headers.iter().for_each(|(k, v)| {
+                self.output_headers.iter().for_each(|(k, v)| {
                     write!(&mut paragraph_buf, "{k}: {v}")
                         .expect("Paragraph buffer string couldn't write");
                 });
